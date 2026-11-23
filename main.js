@@ -145,6 +145,8 @@ function createWindow() {
 
 if (process.env.SATURNE_USERDATA) app.setPath('userData', process.env.SATURNE_USERDATA);
 app.setName('Saturne');
+// every window (tabs, sign-in popups…) presents itself as a normal Chrome: Google refuses sign-in from "Electron"
+app.userAgentFallback = app.userAgentFallback.replace(/\sElectron\/\S+/, '').replace(/\ssaturne-browser\/\S+/i, '').replace(/\sSaturne\/\S+/, '');
 if (process.platform === 'win32') app.setAppUserModelId('Saturne.Browser');
 
 // only one Saturne window at a time: launching again focuses the existing one
@@ -211,11 +213,41 @@ function isAppShortcut(i) {
 }
 
 app.on('web-contents-created', (_e, contents) => {
+  // popup windows (sign-in): links they open go to tabs, and nested popups stay popups
+  if (contents.getType() === 'window') {
+    setImmediate(() => {
+      if (contents.isDestroyed() || (win && contents === win.webContents)) return;
+      contents.setUserAgent(contents.session.getUserAgent());
+      contents.setWindowOpenHandler(({ url, disposition }) => {
+        if (disposition === 'new-window') return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true, parent: win || undefined } };
+        if (win) win.webContents.send('tab:open', { url, background: false });
+        return { action: 'deny' };
+      });
+    });
+    return;
+  }
   if (contents.getType() !== 'webview') return;
 
   // target=_blank / window.open -> open as a new tab instead of a new window
   // Ctrl+click / middle-click on a link opens it in the background
-  contents.setWindowOpenHandler(({ url, disposition }) => {
+  contents.setWindowOpenHandler(({ url, disposition, features }) => {
+    // sign-in popups ("Continue with Google / Apple / Microsoft…") must stay real popups: the site waits
+    // for the popup to answer it (window.opener), which can't happen if it opens as a normal tab
+    if (disposition === 'new-window' && win) {
+      const f = Object.fromEntries(String(features || '').split(',').map((x) => x.trim().split('=')).filter((x) => x[0]));
+      const width = Math.min(Math.max(Number(f.width) || 520, 360), 1200);
+      const height = Math.min(Math.max(Number(f.height) || 680, 420), 1000);
+      const b = win.getBounds();
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width, height,
+          x: Math.round(b.x + (b.width - width) / 2), y: Math.round(b.y + Math.max(40, (b.height - height) / 2)),
+          parent: win, autoHideMenuBar: true, backgroundColor: '#ffffff', title: 'Saturne',
+          icon: path.join(__dirname, 'build', 'icon.ico'), minimizable: false,
+        },
+      };
+    }
     if (win) win.webContents.send('tab:open', { url, background: disposition === 'background-tab' });
     return { action: 'deny' };
   });
@@ -729,6 +761,27 @@ async function installUpdate() {
 ipcMain.handle('update:check', () => checkUpdate());
 ipcMain.handle('update:install', async () => {
   try { await installUpdate(); return { ok: true }; } catch (err) { return { error: err.message }; }
+});
+// changelog = the latest commits of the repository: title + bullet lines of each message
+ipcMain.handle('update:changelog', async () => {
+  try {
+    const res = await net.fetch(`https://api.github.com/repos/${REPO}/commits?sha=${BRANCH}&per_page=30`, {
+      headers: { 'User-Agent': 'Saturne-Browser', Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) throw new Error(`GitHub answered ${res.status}.`);
+    const list = await res.json();
+    const items = list.map((c) => {
+      const msg = ((c.commit && c.commit.message) || '').split('\n');
+      const lines = [];
+      for (const l of msg.slice(1)) {
+        if (/^co-authored-by:/i.test(l.trim())) continue;
+        if (/^\s*[-*•]\s+/.test(l)) lines.push(l.replace(/^\s*[-*•]\s+/, '').trim());
+        else if (l.trim() && lines.length) lines[lines.length - 1] += ' ' + l.trim(); // wrapped line
+      }
+      return { sha: c.sha, title: msg[0].slice(0, 200), lines: lines.slice(0, 15), date: c.commit && c.commit.committer && c.commit.committer.date };
+    });
+    return { items, installed: readBuild().sha || '' };
+  } catch (err) { return { error: 'Couldn’t load the changelog: ' + err.message }; }
 });
 ipcMain.on('update:get', (e) => { e.returnValue = { ...upd, canInstall: app.isPackaged }; });
 

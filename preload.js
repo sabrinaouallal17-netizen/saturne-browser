@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('saturne', {
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onUpdate: on('update:status'),
+  changelog: () => ipcRenderer.invoke('update:changelog'),
 
   // window controls
   minimize: () => ipcRenderer.send('win:minimize'),

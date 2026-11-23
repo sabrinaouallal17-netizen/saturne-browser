@@ -161,23 +161,31 @@
     const row = (icon, label, fn, cls = '') => h('button.pf-row' + cls, { onclick: () => { closePop(); fn(); } }, h('span.ico', { html: icon }), h('span', { text: label }));
     const U = sat.updateStatus();
 
+    // what this profile holds
+    const S = Store.state;
+    const tabs = S.spaces.reduce((n, sp) => n + sp.items.reduce((m, it) => m + (it.type === 'tab' ? 1 : it.children.length), 0), 0);
+    const stat = (n, label) => h('div.pf-stat', null, h('b', { text: n }), h('span', { text: label }));
+    const build = (U.installed || '').slice(0, 7);
+
     pop = h('div.pf-pop', null,
-      h('div.pf-banner', { style: bannerStyle(p) }),
-      h('div.pf-id', null,
-        avatarEl(p, '.big'),
-        h('span.pf-grow'),
-        h('button.s-btn.pf-edit', { html: Icons.pencil + '<span>Edit profile</span>', onclick: () => { closePop(); editProfile(p); } })),
-      h('div.pf-name.pf-under', null, h('b', { text: p.name }), h('span', { text: data.list.length > 1 ? 'Active profile' : 'Your profile' })),
-      h('div.pf-sep'),
-      others.length ? h('div.pf-head', { text: 'Switch profile' }) : null,
-      others.map((o) => h('div.pf-other', null,
-        h('button.pf-row', { onclick: () => { closePop(); switchTo(o); } }, avatarEl(o, '.small'), h('span', { text: o.name })),
-        o.id === 'default' ? null : h('button.pf-del', { html: Icons.trash, 'data-tip': 'Delete profile', onclick: () => { closePop(); removeProfile(o); } }))),
-      row(Icons.plus, 'Add a profile', addProfile),
-      h('div.pf-sep'),
-      U.state === 'available'
-        ? row(Icons.download, 'Update Available — restart to install', installUpdate, '.accent')
-        : row(Icons.reload, U.state === 'checking' ? 'Checking for updates…' : 'Check for updates', checkNow));
+      h('div.pf-banner', { style: bannerStyle(p) },
+        h('button.pf-edit', { html: Icons.pencil + '<span>Edit</span>', 'data-tip': 'Edit profile', onclick: () => { closePop(); editProfile(p); } })),
+      h('div.pf-id', null, avatarEl(p, '.big')),
+      h('div.pf-name.pf-under', null, h('b', { text: p.name }),
+        h('span', { text: data.list.length > 1 ? `Active profile · ${data.list.length} profiles` : 'Your profile' })),
+      h('div.pf-stats', null, stat(S.spaces.length, S.spaces.length === 1 ? 'space' : 'spaces'), stat(tabs, tabs === 1 ? 'tab' : 'tabs'), stat(S.bookmarks.length, S.bookmarks.length === 1 ? 'bookmark' : 'bookmarks')),
+      h('div.pf-group', null,
+        others.length ? h('div.pf-head', { text: 'Switch profile' }) : null,
+        others.map((o) => h('div.pf-other', null,
+          h('button.pf-row', { onclick: () => { closePop(); switchTo(o); } }, avatarEl(o, '.small'), h('span', { text: o.name })),
+          o.id === 'default' ? null : h('button.pf-del', { html: Icons.trash, 'data-tip': 'Delete profile', onclick: () => { closePop(); removeProfile(o); } }))),
+        row(Icons.plus, 'Add a profile', addProfile)),
+      h('div.pf-group', null,
+        U.state === 'available'
+          ? row(Icons.download, 'Update Available — restart to install', installUpdate, '.accent')
+          : row(Icons.reload, U.state === 'checking' ? 'Checking for updates…' : 'Check for updates', checkNow),
+        row(Icons.file, 'Changelog', changelog)),
+      h('div.pf-foot', { text: `Saturne${build ? ' · build ' + build : ''}` }));
 
     document.body.append(pop);
     const b = btnAccount.getBoundingClientRect();
@@ -282,6 +290,36 @@
     if (r && r.error) UI.toast(r.error, 6000);
   }
   btnUpdate.addEventListener('click', installUpdate);
+
+  // ---------- changelog: what changed in each version (from GitHub) ----------
+  function changelog() {
+    UI.modal({
+      title: 'Changelog', wide: true,
+      body(box, close) {
+        const list = h('div.cl-list', null, h('p.cl-wait', { text: 'Loading the changelog…' }));
+        box.append(CustomScroll.wrap(list, 'cl-scroll'), h('div.actions', null,
+          h('button.s-btn.ghost', { text: 'View on GitHub', onclick: () => { close(); Browser.newTab('https://github.com/sabrinaouallal17-netizen/saturne-browser/commits/main'); } }),
+          h('button.s-btn.primary', { text: 'Close', onclick: close })));
+        sat.changelog().then((r) => {
+          if (!r || r.error) { list.replaceChildren(h('p.cl-wait', { text: (r && r.error) || 'Couldn’t load the changelog.' })); return; }
+          let installedSeen = !r.installed;
+          list.replaceChildren(...r.items.map((c) => {
+            const isInstalled = c.sha === r.installed;
+            const isNew = !installedSeen && !isInstalled;
+            if (isInstalled) installedSeen = true;
+            const d = new Date(c.date);
+            return h('div.cl-item' + (isNew ? '.new' : ''), null,
+              h('div.cl-dot'),
+              h('div.cl-body', null,
+                h('div.cl-head', null, h('b', { text: c.title }),
+                  isInstalled ? h('span.cl-tag.cur', { text: 'Installed' }) : isNew ? h('span.cl-tag', { text: 'New' }) : null),
+                h('div.cl-date', { text: `${d.toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' })} · ${c.sha.slice(0, 7)}` }),
+                c.lines.length ? h('ul', null, c.lines.map((l) => h('li', { text: l }))) : null));
+          }));
+        });
+      },
+    });
+  }
   sat.onUpdate(paintUpdate);
 
   // ---------- start ----------
