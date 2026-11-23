@@ -15,6 +15,12 @@ contextBridge.exposeInMainWorld('saturne', {
   importHomeImages: (files) => ipcRenderer.invoke('homeimg:import', Array.from(files || []).map((f) => { try { return webUtils.getPathForFile(f); } catch { return ''; } })),
   deleteHomeImage: (url) => ipcRenderer.send('homeimg:delete', url),
 
+  // ad blocker
+  adblock: (wcId) => ipcRenderer.sendSync('adblock:get', wcId),
+  setAdblock: (on) => ipcRenderer.send('adblock:set', on),
+  allowAds: (host, allow) => ipcRenderer.send('adblock:allow', host, allow),
+  onAdblockCount: on('adblock:count'),
+
   // screenshots & translation
   screenshot: (wcId, mode, rect) => ipcRenderer.invoke('shot:take', wcId, mode, rect),
   translate: (texts, to) => ipcRenderer.invoke('tr:texts', texts, to),

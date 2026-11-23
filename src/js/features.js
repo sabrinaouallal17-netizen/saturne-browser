@@ -610,11 +610,47 @@
   const aTr = h('button.url-act', { html: Icons.translate, 'data-tip': 'Translate page', onclick: (e) => { if (!Menu.justClosed(aTr)) Menu.open({ anchor: aTr, align: 'right', items: Translate.items() }); } });
   const aStore = h('button.url-chip', { html: Icons.plus + '<span>Add to Saturne</span>', onclick: () => { const c = cur(); if (c) installExt(c.tab.url); } });
   const aExt = h('button.url-act', { html: Icons.puzzle, 'data-tip': 'Extensions', onclick: () => extMenu(aExt) });
-  acts.append(aStore, aReader, aTr, aExt);
+  const abBadge = h('span.ab-badge');
+  const aShield = h('button.url-act.ab-btn', { html: Icons.shield, 'data-tip': 'Ad blocker', onclick: () => adMenu() }, abBadge);
+  acts.append(aStore, aShield, aReader, aTr, aExt);
   $('urlbar').append(acts);
+
+  // ---------- ad blocker (blocking happens in the main process) ----------
+  function adMenu() {
+    if (Menu.justClosed(aShield)) return;
+    const c = cur();
+    const st = sat.adblock(c && c.r.wcId);
+    const reload = () => { const x = cur(); if (x) x.wv.reload(); };
+    Menu.open({
+      anchor: aShield, align: 'right', minWidth: 270,
+      items: [
+        { header: 'Ad blocker' },
+        c && st.skipped ? { label: 'Not used on YouTube', icon: Icons.info, disabled: true }
+          : c && st.enabled && !st.allowed ? { label: `${st.count} ad${st.count === 1 ? '' : 's'} & trackers blocked here`, icon: Icons.shield, disabled: true } : null,
+        c && st.host && !st.skipped && st.enabled ? {
+          label: st.allowed ? `Block ads on ${st.host}` : `Allow ads on ${st.host}`, icon: st.allowed ? Icons.shield : Icons.x,
+          onClick: () => { sat.allowAds(st.host, !st.allowed); reload(); paintShield(); },
+        } : null,
+        { sep: true },
+        { label: st.enabled ? 'Turn off the ad blocker' : 'Turn on the ad blocker', icon: Icons.unload, onClick: () => { sat.setAdblock(!st.enabled); reload(); paintShield(); UI.toast(st.enabled ? 'Ad blocker off' : 'Ad blocker on'); } },
+        st.total ? { label: `${st.total} blocked since Saturne started`, disabled: true } : null,
+      ],
+    });
+  }
+  function paintShield() {
+    const c = cur();
+    const st = sat.adblock(c && c.r.wcId);
+    const active = st.enabled && !st.allowed && !st.skipped;
+    aShield.classList.toggle('off', !active);
+    abBadge.textContent = active && st.count ? (st.count > 99 ? '99+' : String(st.count)) : '';
+    aShield.dataset.tip = !st.enabled ? 'Ad blocker is off' : st.skipped ? 'Ad blocker (not used on YouTube)' : st.allowed ? `Ads allowed on ${st.host}` : `Ad blocker · ${st.count} blocked on this page`;
+  }
+  sat.onAdblockCount(({ wcId }) => { const c = cur(); if (c && c.r.wcId === wcId) paintShield(); });
+
   function paintActions() {
     const c = cur();
-    aReader.hidden = !c; aTr.hidden = !c;
+    aReader.hidden = !c; aTr.hidden = !c; aShield.hidden = !c;
+    if (c) paintShield();
     aReader.classList.toggle('on', Reader.isOn());
     aTr.classList.toggle('on', !!trState.get(B.currentTabId));
     const m = c && STORE_RE.exec(c.tab.url);

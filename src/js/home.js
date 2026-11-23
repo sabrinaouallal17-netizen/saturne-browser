@@ -77,9 +77,24 @@
     const hm = H();
     const wp = $('home-wallpaper');
     const w = hm.wallpaper || {};
-    if (w.type === 'image' && w.value) wp.style.background = `center / cover no-repeat url("${w.value.replace(/"/g, '%22')}")`;
-    else if (w.type === 'color') wp.style.background = w.value;
-    else wp.style.background = WALLPAPERS[w.value] || WALLPAPERS.aurora;
+    let vid = wp.querySelector('video');
+    if (w.type === 'video' && w.value) {
+      wp.style.background = '#000';
+      if (!vid) {
+        vid = h('video', { playsinline: '', loop: '', preload: 'auto' });
+        vid.muted = true; vid.defaultMuted = true; vid.autoplay = true;
+        vid.addEventListener('canplay', () => { if ($('home').classList.contains('visible') && vid.paused) vid.play().catch(() => {}); });
+        vid.addEventListener('error', () => { if (H().wallpaper.type === 'video') UI.toast('This video can’t be played — use MP4 (H.264) or WebM', 4000); });
+        wp.append(vid);
+      }
+      if (vid.dataset.src !== w.value) { vid.src = w.value; vid.dataset.src = w.value; }
+      if ($('home').classList.contains('visible')) vid.play().catch(() => {});
+    } else {
+      if (vid) { vid.pause(); vid.remove(); }
+      if (w.type === 'image' && w.value) wp.style.background = `center / cover no-repeat url("${w.value.replace(/"/g, '%22')}")`;
+      else if (w.type === 'color') wp.style.background = w.value;
+      else wp.style.background = WALLPAPERS[w.value] || WALLPAPERS.aurora;
+    }
     wp.style.filter = hm.blur ? `blur(${hm.blur}px)` : '';
     $('home-dim').style.opacity = (hm.dim || 0) / 100;
     $('home').style.setProperty('--w-opacity', hm.widgetOpacity);
@@ -627,108 +642,143 @@
   }
   const row = (label, ...right) => h('div.cp-row', null, h('span.lbl', { text: label }), h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } }, ...right));
 
+  // ---------- wallpaper: preset, color, image / GIF, or video ----------
+  const isVideoUrl = (u) => /\.(mp4|webm|m4v|ogv|mov)([?#]|$)/i.test(u || '');
+  function setWallpaperUrl(u) {
+    H().wallpaper = { type: isVideoUrl(u) ? 'video' : 'image', value: u };
+    commit();
+  }
+  async function pickWallpaper() {
+    const r = await window.saturne.pickWallpaper();
+    if (r && r.error) return UI.toast(r.error, 3500);
+    if (r) setWallpaperUrl(r);
+  }
+
+  // ---------- panel: 4 short tabs instead of one long page ----------
+  let cpTab = 'background';
+  let cpOpenWidget = null; // widget whose options are shown
+  const CP_TABS = [['background', 'Background', 'image'], ['widgets', 'Widgets', 'layout'], ['pictures', 'Pictures', 'sparkle'], ['style', 'Style', 'palette']];
+  const WIDGET_ICONS = {
+    greeting: 'chat', clock: 'history', search: 'search', weather: 'w_partly', recent: 'tabs', notes: 'pencil', analog: 'saturn',
+    calendar: 'layout', links: 'link', todo: 'check', timer: 'bolt', countdown: 'star', worldclock: 'globe', quote: 'reader', battery: 'unload',
+  };
+
   function renderCustomize() {
     const body = $('customize-body');
     const scrollTop = body.scrollTop;
     const hm = H();
     body.innerHTML = '';
 
-    body.append(h('div.cp-head', null, h('h3', { text: 'Customize' }),
-      h('button.gear-btn', { html: Icons.x, 'data-tip': 'Close', onclick: closeCustomize })));
+    const tabs = h('div.cp-tabs', null, CP_TABS.map(([k, label, ic]) => h('button.cp-tab' + (cpTab === k ? '.on' : ''), {
+      onclick: () => { if (cpTab !== k) { cpTab = k; renderCustomize(); body.scrollTop = 0; } },
+    }, h('span.ico', { html: Icons[ic] }), h('span', { text: label }))));
+    body.append(h('div.cp-top', null,
+      h('div.cp-head', null, h('h3', { text: 'Customize' }), h('button.gear-btn', { html: Icons.x, 'data-tip': 'Close  (Esc)', onclick: closeCustomize })),
+      tabs));
+    const page = h('div.cp-page');
+    body.append(page);
 
-    // --- wallpaper
-    const wpGrid = h('div.wp-grid');
-    Object.entries(WALLPAPERS).forEach(([k, css]) => {
-      const on = hm.wallpaper.type === 'preset' && hm.wallpaper.value === k;
-      const t = h('button.wp' + (on ? '.on' : ''), { 'data-tip': k[0].toUpperCase() + k.slice(1), style: { background: css } });
-      t.onclick = () => { hm.wallpaper = { type: 'preset', value: k }; commit(); };
-      wpGrid.append(t);
-    });
-    const up = h('button.wp.upload' + (hm.wallpaper.type === 'image' ? '.on' : ''), { html: Icons.upload, 'data-tip': 'Upload an image' });
-    if (hm.wallpaper.type === 'image') { up.style.background = `center/cover url("${hm.wallpaper.value}")`; up.innerHTML = ''; }
-    up.onclick = async () => {
-      const url = await window.saturne.pickWallpaper();
-      if (url) { hm.wallpaper = { type: 'image', value: url }; commit(); }
-    };
-    wpGrid.append(up);
-    const urlField = UI.field({ icon: Icons.image, placeholder: 'Paste an image URL and press Enter', clearable: true,
-      onEnter: (v) => { if (/^https?:\/\//i.test(v.trim())) { hm.wallpaper = { type: 'image', value: v.trim() }; commit(); } else UI.toast('Enter a valid http(s) image URL'); } });
-    body.append(h('div.cp-sec', null, h('h4', { text: 'Wallpaper' }), wpGrid,
-      h('div.cp-col', null, urlField.el),
-      h('div.cp-col', null,
-        row('Solid color', colorInput(hm.wallpaper.type === 'color' ? hm.wallpaper.value : '#333333', (v) => { hm.wallpaper = { type: 'color', value: v }; applyHome(); Store.save(); })),
-        rangeRow('Blur', hm.blur, 0, 30, 'px', (v) => { hm.blur = v; applyHome(); }),
-        rangeRow('Dim', hm.dim, 0, 80, '%', (v) => { hm.dim = v; applyHome(); }))));
+    if (cpTab === 'background') {
+      const w = hm.wallpaper;
+      const grid = h('div.wp-grid');
+      Object.entries(WALLPAPERS).forEach(([k, css]) => {
+        const on = w.type === 'preset' && w.value === k;
+        grid.append(h('button.wp' + (on ? '.on' : ''), { 'data-tip': k[0].toUpperCase() + k.slice(1), style: { background: css }, onclick: () => { hm.wallpaper = { type: 'preset', value: k }; commit(); } }));
+      });
+      // your own picture / GIF / video
+      const mine = w.type === 'image' || w.type === 'video';
+      const own = h('button.wp.wp-own' + (mine ? '.on' : ''), { 'data-tip': mine ? 'Your wallpaper — click to change' : 'Your own image, GIF or video', onclick: pickWallpaper });
+      if (w.type === 'image') own.style.background = `center/cover url("${w.value.replace(/"/g, '%22')}")`;
+      else if (w.type === 'video') { const v = h('video', { src: w.value, preload: 'metadata' }); v.muted = true; own.append(v, h('span.wp-tag', { html: Icons.video })); }
+      else own.append(h('span.wp-plus', { html: Icons.upload }));
+      grid.append(own);
+      const solid = colorInput(w.type === 'color' ? w.value : '#333333', (v) => { hm.wallpaper = { type: 'color', value: v }; applyHome(); Store.save(); grid.querySelectorAll('.wp').forEach((x) => x.classList.remove('on')); });
+      solid.classList.add('wp', 'wp-color');
+      if (w.type === 'color') solid.classList.add('on');
+      solid.dataset.tip = 'Solid color';
+      grid.append(solid);
 
-    // --- colors (grays)
-    const themes = h('div.theme-grid');
-    Object.entries(Store.THEMES).forEach(([name, t]) => {
-      const chip = h('button.theme-chip', null,
-        h('span.sw', null, h('i', { style: { background: t.bg } }), h('i', { style: { background: t.panel } }), h('i', { style: { background: t.field } }), h('i', { style: { background: t.accent } })),
-        h('span', { text: name }));
-      chip.onclick = () => { Object.assign(S.theme, t); Browser.applyTheme(); Store.save(); renderCustomize(); };
-      themes.append(chip);
-    });
-    const colorRows = [
-      ['bg', 'Window & sidebar'], ['panel', 'Content panel'], ['field', 'Fields & search bar'],
-      ['text', 'Text'], ['accent', 'Accent'], ['card', 'Favorite cards'],
-    ].map(([k, label]) => row(label, colorInput(S.theme[k], (v) => { S.theme[k] = v; Browser.applyTheme(); Store.save(); })));
-    body.append(h('div.cp-sec', null, h('h4', { text: 'Colors' }), themes, h('div.cp-col', null, ...colorRows),
-      h('div.cp-actions', null, h('button.s-btn', { text: 'Reset colors', onclick: () => { Object.assign(S.theme, Store.THEMES.Graphite); Browser.applyTheme(); Store.save(); renderCustomize(); } }))));
+      const url = UI.field({ icon: Icons.link, placeholder: 'Or paste an image, GIF or video link', clearable: true,
+        onEnter: (v) => { const u = v.trim(); if (/^https?:\/\/\S+$/i.test(u)) setWallpaperUrl(u); else UI.toast('Enter a valid http(s) link'); } });
+      page.append(
+        h('div.cp-card', null, grid,
+          h('button.s-btn.primary.cp-wide', { html: `<span class="ico">${Icons.upload}</span>Upload an image, GIF or video…`, onclick: pickWallpaper }),
+          h('div.cp-col', null, url.el),
+          h('p.cp-hint', { text: 'Videos play muted and in a loop (MP4 or WebM). GIFs are animated too.' })),
+        h('div.cp-card', null,
+          rangeRow('Blur', hm.blur, 0, 30, 'px', (v) => { hm.blur = v; applyHome(); }),
+          rangeRow('Darken', hm.dim, 0, 80, '%', (v) => { hm.dim = v; applyHome(); })));
+    }
 
-    // --- widgets
-    const wsec = h('div.cp-sec', null, h('h4', { text: 'Widgets' }));
-    Object.entries(WIDGETS).forEach(([key, label]) => {
-      const cfg = hm.widgets[key];
-      const opts = widgetOptions(key, cfg);
-      const gear = opts ? h('button.gear-btn', { html: Icons.gear, 'data-tip': 'Options' }) : null;
-      wsec.append(row(label, gear, UI.switch(cfg.enabled, (on) => { cfg.enabled = on; Store.save(); renderWidgets(); })));
-      if (opts) {
-        opts.hidden = true;
-        gear.onclick = () => (opts.hidden = !opts.hidden);
-        wsec.append(opts);
+    if (cpTab === 'widgets') {
+      const grid = h('div.wd-grid');
+      Object.entries(WIDGETS).forEach(([key, label]) => {
+        const cfg = hm.widgets[key];
+        const hasOpts = !!widgetOptions(key, cfg);
+        const tile = h('div.wd-tile' + (cfg.enabled ? '.on' : '') + (cpOpenWidget === key ? '.open' : ''), null,
+          h('button.wd-main', { onclick: () => { cfg.enabled = !cfg.enabled; Store.save(); renderWidgets(); renderCustomize(); } },
+            h('span.wd-ico', { html: Icons[WIDGET_ICONS[key]] || Icons.layout }), h('span.wd-name', { text: label }),
+            h('span.wd-check', { html: Icons.check })),
+          hasOpts && cfg.enabled ? h('button.wd-gear', { html: Icons.gear, 'data-tip': 'Options', onclick: () => { cpOpenWidget = cpOpenWidget === key ? null : key; renderCustomize(); } }) : null);
+        grid.append(tile);
+      });
+      let opts = null;
+      if (cpOpenWidget && hm.widgets[cpOpenWidget] && hm.widgets[cpOpenWidget].enabled) {
+        const box = widgetOptions(cpOpenWidget, hm.widgets[cpOpenWidget]);
+        if (box) opts = h('div.cp-card.wd-opts', null,
+          h('div.cp-row', null, h('b', { text: WIDGETS[cpOpenWidget] + ' options' }), h('button.gear-btn', { html: Icons.x, onclick: () => { cpOpenWidget = null; renderCustomize(); } })), box);
       }
-    });
-    wsec.append(h('div.cp-actions', null,
-      h('button.s-btn.primary', { html: `<span class="ico">${Icons.layout}</span>Edit layout`, onclick: () => setEditing(true) }),
-      h('button.s-btn', { text: 'Reset layout', onclick: () => {
-        const d = Store.defaultHome().widgets;
-        for (const k in d) Object.assign(hm.widgets[k], { x: d[k].x, y: d[k].y, scale: 1 });
-        Store.save(); renderWidgets();
-      } })));
-    body.append(wsec);
+      page.append(
+        h('div.cp-actions.cp-top-actions', null,
+          h('button.s-btn.primary', { html: `<span class="ico">${Icons.layout}</span>Move & resize`, onclick: () => setEditing(true) }),
+          h('button.s-btn', { text: 'Reset positions', onclick: () => {
+            const d = Store.defaultHome().widgets;
+            for (const k in d) Object.assign(hm.widgets[k], { x: d[k].x, y: d[k].y, scale: d[k].scale || 1 });
+            Store.save(); renderWidgets();
+          } })),
+        h('p.cp-hint', { text: 'Click a widget to show or hide it.' }),
+        ...(opts ? [opts] : []), grid);
+    }
 
-    // --- CustomIMG: pictures & GIFs
-    const imgs = hm.images || [];
-    const thumbs = h('div.ci-thumbs', null, imgs.map((img) => {
-      const t = h('button.ci-thumb', { 'data-tip': 'Options' }, h('img', { src: img.src, alt: '' }),
-        h('span.ci-del', { html: Icons.x, 'data-tip': 'Delete' }));
-      t.onclick = (e) => { if (e.target.closest('.ci-del')) removeImage(img); else imageOptions(img); };
-      return t;
-    }));
-    const imgUrl = UI.field({ icon: Icons.link, placeholder: 'Paste an image or GIF URL and press Enter', clearable: true,
-      onEnter: (v) => {
-        const u = v.trim();
-        if (!/^https?:\/\/\S+$/i.test(u)) return UI.toast('Enter a valid http(s) image URL');
-        addImages([u]);
-      } });
-    body.append(h('div.cp-sec', null, h('h4', { text: 'CustomIMG — pictures & GIFs' }),
-      h('div.cp-actions', { style: { marginTop: 0 } }, h('button.s-btn.primary', { html: `<span class="ico">${Icons.image}</span>Add images or GIFs…`, onclick: pickImages })),
-      h('div.cp-col', null, imgUrl.el),
-      h('p.cp-hint', { text: 'You can also drag images from your files (or from a website) onto the home page. Right-click an image for its options.' }),
-      imgs.length ? thumbs : null));
+    if (cpTab === 'pictures') {
+      const imgs = hm.images || [];
+      const thumbs = h('div.ci-thumbs', null, imgs.map((img) => {
+        const t = h('button.ci-thumb', { 'data-tip': 'Options' }, h('img', { src: img.src, alt: '' }), h('span.ci-del', { html: Icons.x, 'data-tip': 'Delete' }));
+        t.onclick = (e) => { if (e.target.closest('.ci-del')) removeImage(img); else imageOptions(img); };
+        return t;
+      }));
+      const imgUrl = UI.field({ icon: Icons.link, placeholder: 'Or paste an image or GIF link', clearable: true,
+        onEnter: (v) => { const u = v.trim(); if (!/^https?:\/\/\S+$/i.test(u)) return UI.toast('Enter a valid http(s) image URL'); addImages([u]); } });
+      page.append(h('div.cp-card', null,
+        h('button.s-btn.primary.cp-wide', { html: `<span class="ico">${Icons.image}</span>Add images or GIFs…`, onclick: pickImages }),
+        h('div.cp-col', null, imgUrl.el),
+        h('p.cp-hint', { text: 'Pictures float on your home page: drag them in “Move & resize”, right-click one for its options. You can also drop files on the page.' })),
+        ...(imgs.length ? [h('div.cp-card', null, h('div.cp-label', { text: `On your home page (${imgs.length})` }), thumbs)] : []));
+    }
 
-    // --- widget style
-    body.append(h('div.cp-sec', null, h('h4', { text: 'Widget style' }),
-      rangeRow('Opacity', hm.widgetOpacity, 0, 100, '%', (v) => { hm.widgetOpacity = v; applyHome(); }),
-      rangeRow('Corner radius', hm.widgetRadius, 0, 28, 'px', (v) => { hm.widgetRadius = v; applyHome(); })));
-
-    body.append(h('div.cp-sec', null, h('div.cp-actions', null,
-      h('button.s-btn.danger', { text: 'Reset home page', onclick: async () => {
-        if (!(await UI.confirm({ title: 'Reset home page?', message: 'Wallpaper, widgets and layout go back to default.', ok: 'Reset', danger: true }))) return;
-        (S.home.images || []).forEach((img) => { if (img.src.startsWith('file:')) window.saturne.deleteHomeImage(img.src); });
-        S.home = Store.defaultHome(); Store.save(); applyHome(); renderWidgets(); renderCustomize();
-      } }))));
+    if (cpTab === 'style') {
+      const themes = h('div.theme-grid');
+      Object.entries(Store.THEMES).forEach(([name, t]) => {
+        const on = S.theme.bg === t.bg && S.theme.accent === t.accent;
+        themes.append(h('button.theme-chip' + (on ? '.on' : ''), { onclick: () => { Object.assign(S.theme, t); Browser.applyTheme(); Store.save(); renderCustomize(); } },
+          h('span.sw', null, h('i', { style: { background: t.bg } }), h('i', { style: { background: t.panel } }), h('i', { style: { background: t.field } }), h('i', { style: { background: t.accent } })),
+          h('span', { text: name })));
+      });
+      const custom = h('details.cp-more', null, h('summary', { text: 'Custom colors' }),
+        ...[['bg', 'Window & sidebar'], ['panel', 'Content panel'], ['field', 'Fields & search bar'], ['text', 'Text'], ['accent', 'Accent'], ['card', 'Favorite cards']]
+          .map(([k, label]) => row(label, colorInput(S.theme[k], (v) => { S.theme[k] = v; Browser.applyTheme(); Store.save(); }))),
+        h('div.cp-actions', null, h('button.s-btn', { text: 'Reset colors', onclick: () => { Object.assign(S.theme, Store.THEMES.Graphite); Browser.applyTheme(); Store.save(); renderCustomize(); } })));
+      page.append(
+        h('div.cp-card', null, h('div.cp-label', { text: 'Theme' }), themes, custom),
+        h('div.cp-card', null, h('div.cp-label', { text: 'Widgets' }),
+          rangeRow('Background opacity', hm.widgetOpacity, 0, 100, '%', (v) => { hm.widgetOpacity = v; applyHome(); }),
+          rangeRow('Rounded corners', hm.widgetRadius, 0, 28, 'px', (v) => { hm.widgetRadius = v; applyHome(); })),
+        h('div.cp-actions', null, h('button.s-btn.danger', { text: 'Reset home page', onclick: async () => {
+          if (!(await UI.confirm({ title: 'Reset home page?', message: 'Wallpaper, widgets, pictures and layout go back to default.', ok: 'Reset', danger: true }))) return;
+          (S.home.images || []).forEach((img) => { if (img.src.startsWith('file:')) window.saturne.deleteHomeImage(img.src); });
+          S.home = Store.defaultHome(); Store.save(); applyHome(); renderWidgets(); renderCustomize();
+        } })));
+    }
 
     body.scrollTop = scrollTop;
   }
@@ -830,7 +880,7 @@
         Menu.open({ x: e.clientX, y: e.clientY, items: [
           { label: 'Customize home page', icon: Icons.palette, onClick: () => Home.openCustomize() },
           { label: $('home').classList.contains('editing') ? 'Finish editing layout' : 'Edit layout', icon: Icons.layout, onClick: () => setEditing(!$('home').classList.contains('editing')) },
-          { label: 'Change wallpaper…', icon: Icons.image, onClick: async () => { const u = await window.saturne.pickWallpaper(); if (u) { H().wallpaper = { type: 'image', value: u }; commit(); } } },
+          { label: 'Change wallpaper (image, GIF, video)…', icon: Icons.image, onClick: pickWallpaper },
           { label: 'Add image or GIF…', icon: Icons.upload, onClick: pickImages },
         ] });
       });
@@ -862,6 +912,9 @@
     },
     show(on) {
       $('home').classList.toggle('visible', on);
+      // the video wallpaper only plays while the home page is on screen
+      const vid = $('home-wallpaper').querySelector('video');
+      if (vid) { if (on) vid.play().catch(() => {}); else vid.pause(); }
       if (!on) { closeCustomize(); setEditing(false); }
       else Home.refreshRecent();
     },

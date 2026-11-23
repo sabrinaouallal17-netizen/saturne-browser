@@ -338,6 +338,75 @@ ipcMain.on('perm:forget', (_e, origin, key) => {
   savePerms();
 });
 
+// ---------- Ad blocker ----------
+const AB = require('./adblock');
+const abPath = () => path.join(profileDir(), 'saturne-adblock.json');
+let ab = null; // { enabled, allow: [host] }
+const loadAb = () => {
+  if (ab) return ab;
+  try { ab = JSON.parse(fs.readFileSync(abPath(), 'utf8')); } catch { ab = null; }
+  if (!ab || typeof ab !== 'object') ab = {};
+  if (typeof ab.enabled !== 'boolean') ab.enabled = true;
+  if (!Array.isArray(ab.allow)) ab.allow = [];
+  return ab;
+};
+const saveAb = () => fs.promises.writeFile(abPath(), JSON.stringify(ab)).catch(() => {});
+const abCounts = new Map(); // tab webContents id -> ads blocked on the current page
+let abTotal = 0;
+// is blocking active for this page (top-level address)?
+const abActiveFor = (pageUrl) => {
+  const hst = AB.hostOf(pageUrl);
+  if (!loadAb().enabled || !hst) return false;
+  return !AB.matches(hst, AB.SKIP_SITES) && !AB.matches(hst, ab.allow);
+};
+let abSendT = null;
+const abSend = (wcId) => {
+  clearTimeout(abSendT);
+  abSendT = setTimeout(() => { if (win) win.webContents.send('adblock:count', { wcId, count: abCounts.get(wcId) || 0, total: abTotal }); }, 250);
+};
+function setupAdblock(ses) {
+  loadAb();
+  ses.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }, (d, cb) => {
+    if (!ab.enabled || d.resourceType === 'mainFrame') return cb({});
+    const hst = AB.hostOf(d.url);
+    if (!hst || !AB.matches(hst, AB.BLOCKED)) return cb({});
+    const wc = d.webContentsId ? webContents.fromId(d.webContentsId) : null;
+    if (!wc || wc.isDestroyed() || wc.getType() !== 'webview' || !abActiveFor(wc.getURL())) return cb({});
+    abCounts.set(wc.id, (abCounts.get(wc.id) || 0) + 1);
+    abTotal++;
+    abSend(wc.id);
+    // a blocked tracking pixel would show as a broken image: give it an empty one instead
+    if (d.resourceType === 'image') return cb({ redirectURL: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7' });
+    cb({ cancel: true });
+  });
+}
+app.on('web-contents-created', (_e, contents) => {
+  if (contents.getType() !== 'webview') return;
+  contents.on('did-start-navigation', (d) => {
+    if (d.isMainFrame && !d.isSameDocument) { abCounts.set(contents.id, 0); abSend(contents.id); }
+  });
+  contents.on('dom-ready', () => { if (abActiveFor(contents.getURL())) contents.insertCSS(AB.COSMETIC).catch(() => {}); });
+  contents.once('destroyed', () => abCounts.delete(contents.id));
+});
+ipcMain.on('adblock:get', (e, wcId) => {
+  const wc = wcId ? webContents.fromId(wcId) : null;
+  const url = wc && !wc.isDestroyed() ? wc.getURL() : '';
+  const hst = AB.hostOf(url);
+  e.returnValue = {
+    enabled: loadAb().enabled, count: abCounts.get(wcId) || 0, total: abTotal, host: hst.replace(/^www\./, ''),
+    allowed: !!hst && AB.matches(hst, ab.allow), skipped: !!hst && AB.matches(hst, AB.SKIP_SITES),
+  };
+});
+ipcMain.on('adblock:set', (e, enabled) => { if (!fromUI(e)) return; loadAb().enabled = !!enabled; saveAb(); });
+ipcMain.on('adblock:allow', (e, host, allow) => {
+  if (!fromUI(e) || typeof host !== 'string' || !host) return;
+  loadAb();
+  const hst = host.toLowerCase().replace(/^www\./, '');
+  ab.allow = ab.allow.filter((x) => x !== hst);
+  if (allow) ab.allow.push(hst);
+  saveAb();
+});
+
 // ---------- Session setup (user agent, permissions, downloads) ----------
 function setupSession() {
   const ses = session.fromPartition(PARTITION_NOW());
@@ -350,6 +419,7 @@ function setupSession() {
 
   setupCookies(ses);
   setupPermissions(ses);
+  setupAdblock(ses);
 
   let dlId = 0;
   const items = new Map();
@@ -406,12 +476,16 @@ ipcMain.handle('state:save', async (_e, data) => {
 
 ipcMain.handle('wallpaper:pick', async () => {
   const res = await dialog.showOpenDialog(win, {
-    title: 'Choose a wallpaper',
+    title: 'Choose a wallpaper (image, GIF or video)',
     properties: ['openFile'],
-    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif'] }],
+    filters: [
+      { name: 'Images, GIFs & videos', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'mp4', 'webm', 'm4v', 'ogv', 'mov'] },
+      { name: 'Videos', extensions: ['mp4', 'webm', 'm4v', 'ogv', 'mov'] },
+    ],
   });
   if (res.canceled || !res.filePaths[0]) return null;
   const src = res.filePaths[0];
+  if ((await fs.promises.stat(src)).size > 1024 * 1024 * 1024) return { error: 'This file is too big (1 GB max).' };
   const dir = path.join(app.getPath('userData'), 'wallpapers');
   await fs.promises.mkdir(dir, { recursive: true });
   const dest = path.join(dir, `wallpaper-${Date.now()}${path.extname(src).toLowerCase()}`);

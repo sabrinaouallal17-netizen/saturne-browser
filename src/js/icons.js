@@ -74,6 +74,8 @@
     paste: s('<rect x="5" y="4.5" width="14" height="16.5" rx="2"/><path d="M9 4.5V3h6v1.5"/><path d="M9 11h6M9 15h4"/>'),
     selectAll: s('<rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 2.5"/><path d="M9 12l2 2 4-4"/>'),
     window: s('<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 9h18"/>'),
+    shield: s('<path d="M12 3l7.5 3v5.5c0 4.6-3.2 8.3-7.5 9.5-4.3-1.2-7.5-4.9-7.5-9.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/>'),
+    video: s('<rect x="3" y="5" width="13" height="14" rx="2.5"/><path d="M16 10l5-3v10l-5-3z"/>'),
     split: s('<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/>'),
     swap: s('<path d="M7 7h12M15 3l4 4-4 4"/><path d="M17 17H5M9 13l-4 4 4 4"/>'),
     tabs: s('<rect x="3" y="7" width="14" height="13" rx="2"/><path d="M7 7V5.5A1.5 1.5 0 0 1 8.5 4h11A1.5 1.5 0 0 1 21 5.5v10a1.5 1.5 0 0 1-1.5 1.5H17"/>'),
