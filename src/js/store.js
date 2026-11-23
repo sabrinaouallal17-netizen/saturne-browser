@@ -45,7 +45,22 @@
         recent: { enabled: true, x: 50, y: 72, scale: 1 },
         weather: { enabled: true, x: 87, y: 20, scale: 1, city: 'Paris', unit: 'c', lat: 48.8566, lon: 2.3522, label: 'Paris' },
         notes: { enabled: false, x: 13, y: 22, scale: 1, text: '' },
+        analog: { enabled: false, x: 13, y: 76, scale: 1, numbers: true },
+        calendar: { enabled: false, x: 87, y: 81, scale: 0.85, mondayFirst: true },
+        links: { enabled: false, x: 50, y: 90, scale: 1, items: [
+          { url: 'https://www.youtube.com/', title: 'YouTube' },
+          { url: 'https://github.com/', title: 'GitHub' },
+          { url: 'https://www.wikipedia.org/', title: 'Wikipedia' },
+          { url: 'https://mail.google.com/', title: 'Gmail' },
+        ] },
+        todo: { enabled: false, x: 13, y: 47, scale: 1, items: [] },
+        timer: { enabled: false, x: 87, y: 47, scale: 1, work: 25, rest: 5 },
+        countdown: { enabled: false, x: 50, y: 62, scale: 1, label: 'New Year', date: `${new Date().getFullYear() + 1}-01-01` },
+        worldclock: { enabled: false, x: 13, y: 14, scale: 1, zones: ['America/New_York', 'Asia/Tokyo'] },
+        quote: { enabled: false, x: 50, y: 8, scale: 1 },
+        battery: { enabled: false, x: 79, y: 9, scale: 1 },
       },
+      images: [], // CustomIMG widgets: { id, src, x, y, scale, width, radius, opacity, rotate, shadow, link }
     };
   }
 

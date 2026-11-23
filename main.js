@@ -410,6 +410,41 @@ ipcMain.handle('wallpaper:pick', async () => {
   return pathToFileURL(dest).href;
 });
 
+// ---------- CustomIMG widget: pictures & GIFs on the home page ----------
+// Files are copied into the profile folder so the saved state only keeps a short file:// link.
+const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'apng'];
+const homeImgDir = () => { const d = path.join(profileDir(), 'home-images'); fs.mkdirSync(d, { recursive: true }); return d; };
+async function importHomeImages(paths) {
+  const out = [];
+  for (const src of paths.slice(0, 30)) {
+    try {
+      const ext = path.extname(src || '').slice(1).toLowerCase();
+      if (!IMG_EXT.includes(ext)) continue;
+      const st = await fs.promises.stat(src);
+      if (!st.isFile() || st.size > 60 * 1024 * 1024) continue;
+      const dest = path.join(homeImgDir(), `img-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}.${ext}`);
+      await fs.promises.copyFile(src, dest);
+      out.push(pathToFileURL(dest).href);
+    } catch {}
+  }
+  return out;
+}
+ipcMain.handle('homeimg:pick', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Add images or GIFs to the home page',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Images & GIFs', extensions: IMG_EXT }],
+  });
+  return res.canceled ? [] : importHomeImages(res.filePaths);
+});
+ipcMain.handle('homeimg:import', (_e, paths) => importHomeImages(Array.isArray(paths) ? paths.filter((p) => typeof p === 'string') : []));
+ipcMain.on('homeimg:delete', (_e, url) => {
+  try {
+    const p = require('url').fileURLToPath(url);
+    if (path.dirname(p) === homeImgDir()) fs.promises.unlink(p).catch(() => {}); // only our own copies
+  } catch {}
+});
+
 ipcMain.handle('page:capture', async (_e, wcId) => {
   try {
     const wc = webContents.fromId(wcId);

@@ -1,5 +1,5 @@
 // Saturne Browser - safe bridge between the UI and the main process
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const on = (channel) => (cb) => {
   const handler = (_e, data) => cb(data);
@@ -9,6 +9,11 @@ const on = (channel) => (cb) => {
 
 contextBridge.exposeInMainWorld('saturne', {
   partition: ipcRenderer.sendSync('profile:partition'),
+
+  // CustomIMG widget (home page pictures & GIFs)
+  pickHomeImages: () => ipcRenderer.invoke('homeimg:pick'),
+  importHomeImages: (files) => ipcRenderer.invoke('homeimg:import', Array.from(files || []).map((f) => { try { return webUtils.getPathForFile(f); } catch { return ''; } })),
+  deleteHomeImage: (url) => ipcRenderer.send('homeimg:delete', url),
 
   // default browser
   isDefaultBrowser: () => ipcRenderer.invoke('browser:is-default'),
