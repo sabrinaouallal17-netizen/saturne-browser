@@ -100,7 +100,7 @@ svg { display: block; }
 #nav-btns { position: absolute; left: 209px; top: 6px; display: flex; gap: 4px; }
 
 #urlbar {
-  position: absolute; top: 5px; left: 26.63%; right: 18.82%;
+  position: absolute; top: 5px; left: 26.63%; right: max(18.82%, calc(var(--winbtns-w, 200px) + 14px));
   height: 32px; border-radius: 8px;
   background: var(--field);
   display: flex; align-items: center;
@@ -738,3 +738,134 @@ body.resizing.ew, body.resizing.ew * { cursor: ew-resize !important; }
 .icon-pick:hover { background: var(--active); }
 .icon-pick.on { box-shadow: 0 0 0 2px var(--accent); }
 .color-chip.none { background: conic-gradient(var(--text) 0 25%, transparent 0 50%, var(--text) 0 75%, transparent 0) center / 8px 8px; opacity: .6; }
+
+/* =========================================================
+   Find in page, permission prompts, crashed pages
+   ========================================================= */
+#findbar {
+  position: absolute; top: 10px; right: 14px; z-index: 30; display: none; align-items: center; gap: 2px;
+  height: 38px; padding: 0 4px 0 10px; border-radius: 10px;
+  background: var(--menu); border: 1px solid var(--menu-line); box-shadow: 0 12px 32px rgba(0,0,0,.45);
+  animation: menu-in .16s var(--ease);
+}
+#findbar.open { display: flex; }
+#findbar .find-ico { display: grid; color: var(--muted); margin-right: 4px; }
+#findbar .find-ico svg { width: 15px; height: 15px; }
+#findbar input { width: 200px; height: 28px; border: 0; outline: 0; background: transparent; }
+#findbar .find-count { min-width: 54px; padding: 0 6px; text-align: right; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+#findbar.none .find-count { color: #ff8a80; }
+#findbar.none input { color: #ff8a80; }
+#findbar .icon-btn { width: 28px; height: 28px; }
+#findbar .icon-btn.up svg { transform: rotate(180deg); }
+
+#permprompt {
+  position: absolute; top: 10px; left: 14px; z-index: 31; display: none; width: 340px; padding: 16px;
+  border-radius: 12px; background: var(--menu); border: 1px solid var(--menu-line); box-shadow: 0 16px 44px rgba(0,0,0,.5);
+  animation: menu-in .18s var(--ease);
+}
+#permprompt.open { display: block; }
+#permprompt .perm-head { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+#permprompt .perm-head > span:last-child { color: var(--muted); }
+#permprompt .perm-ico { display: grid; color: var(--accent); }
+#permprompt .perm-ico svg { width: 17px; height: 17px; }
+#permprompt ul { margin: 12px 0 0; padding: 0; list-style: none; }
+#permprompt li { position: relative; padding: 4px 0 4px 18px; }
+#permprompt li::before { content: ''; position: absolute; left: 4px; top: 11px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+#permprompt .perm-remember { display: flex; align-items: center; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 12.5px; }
+#permprompt .perm-remember input { accent-color: var(--accent); margin: 0; }
+#permprompt .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+.perm-list { display: flex; flex-direction: column; gap: 8px; max-height: 52vh; overflow: auto; }
+.perm-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: var(--hover); }
+.perm-row > b { min-width: 150px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.perm-chips { flex: 1; display: flex; flex-wrap: wrap; gap: 6px; }
+.perm-chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 4px 0 10px; border-radius: 12px; font-size: 12px; background: var(--active); }
+.perm-chip.on { color: #9be59b; }
+.perm-chip.off { color: #ff8a80; }
+.perm-chip button { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: var(--muted); }
+.perm-chip button:hover { background: var(--hover); color: var(--text); }
+.perm-chip button svg { width: 11px; height: 11px; }
+
+#crashpage { position: absolute; inset: 0; z-index: 20; display: none; place-items: center; background: var(--panel); }
+#crashpage.open { display: grid; }
+#crashpage .crash-box { max-width: 420px; padding: 24px; text-align: center; }
+#crashpage .crash-ico { display: inline-grid; place-items: center; width: 56px; height: 56px; border-radius: 16px; color: var(--accent); background: var(--hover); }
+#crashpage .crash-ico svg { width: 28px; height: 28px; }
+#crashpage h1 { margin: 16px 0 4px; font-size: 22px; font-weight: 600; }
+#crashpage .crash-host { margin: 0 0 12px; color: var(--accent); }
+#crashpage p { color: var(--muted); line-height: 1.5; margin: 0; }
+#crashpage .actions { display: flex; justify-content: center; gap: 8px; margin-top: 20px; }
+#crashpage .s-btn { display: inline-flex; align-items: center; gap: 6px; }
+#crashpage .s-btn svg { width: 15px; height: 15px; }
+
+/* =========================================================
+   Profile button + menu, "Update Available"
+   ========================================================= */
+#btn-account { width: 44px; }
+#btn-account.open { background: var(--hover); }
+.pf-avatar {
+  display: inline-grid; place-items: center; flex: none; width: 24px; height: 24px; border-radius: 50%;
+  background-size: cover; background-position: center; color: #111; font-size: 11.5px; font-weight: 700;
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--text) 18%, transparent);
+}
+.pf-avatar.small { width: 22px; height: 22px; font-size: 10.5px; }
+.pf-avatar.big { width: 64px; height: 64px; font-size: 26px; box-shadow: 0 0 0 4px var(--menu); }
+#btn-update {
+  width: auto; padding: 0 14px 0 11px; margin: 7px 6px 7px 0; height: 28px; border-radius: 14px; gap: 6px;
+  display: inline-flex; align-items: center; align-self: center;
+  background: var(--accent); color: #111; font-size: 12.5px; font-weight: 600;
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--accent) 40%, transparent);
+  animation: menu-in .3s var(--ease);
+}
+#btn-update[hidden] { display: none; }
+#btn-update:hover { background: var(--accent); filter: brightness(1.08); }
+#btn-update .ico { display: grid; }
+#btn-update .ico svg { width: 14px; height: 14px; }
+#btn-update.busy { opacity: .75; pointer-events: none; }
+
+.pf-pop {
+  position: fixed; z-index: 1000; width: 300px; padding: 0 0 6px; overflow: hidden;
+  background: var(--menu); border: 1px solid var(--menu-line); border-radius: 14px;
+  box-shadow: 0 16px 48px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.3);
+  animation: menu-in .16s var(--ease); transform-origin: top right;
+}
+.pf-banner { height: 96px; background-size: cover; background-position: center; position: relative; }
+.pf-id { display: flex; align-items: flex-end; gap: 12px; padding: 0 14px; margin-top: -32px; position: relative; }
+.pf-name { flex: 1; min-width: 0; display: flex; flex-direction: column; padding-bottom: 4px; }
+.pf-name b { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-name span { color: var(--muted); font-size: 12px; }
+.pf-edit { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; margin-bottom: 4px; font-size: 12.5px; }
+.pf-edit svg { width: 13px; height: 13px; }
+.pf-sep { height: 1px; margin: 10px 0 5px; background: var(--menu-line); }
+.pf-head { padding: 4px 16px 2px; color: var(--muted); font-size: 11.5px; }
+.pf-row { display: flex; align-items: center; gap: 10px; width: calc(100% - 10px); height: 34px; margin: 0 5px; padding: 0 10px; border-radius: 8px; text-align: left; }
+.pf-row:hover { background: var(--hover); }
+.pf-row .ico { display: grid; color: var(--muted); }
+.pf-row .ico svg { width: 15px; height: 15px; }
+.pf-row.accent, .pf-row.accent .ico { color: var(--accent); }
+.pf-other { display: flex; align-items: center; padding-right: 8px; }
+.pf-other .pf-row { flex: 1; width: auto; margin-right: 0; }
+.pf-del { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--muted); opacity: 0; }
+.pf-other:hover .pf-del { opacity: 1; }
+.pf-del:hover { background: var(--hover); color: #ff8a80; }
+.pf-del svg { width: 14px; height: 14px; }
+
+.pf-preview { margin: -4px 0 6px; border-radius: 12px; overflow: hidden; background: color-mix(in srgb, var(--text) 4%, transparent); padding-bottom: 12px; }
+.pf-preview .pf-banner { height: 150px; }
+.pf-preview .pf-id { margin-top: -36px; }
+.pf-pic-btns { position: absolute; right: 10px; top: 10px; display: flex; gap: 6px; }
+.pf-pic-btns .s-btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; }
+.pf-pic-btns svg { width: 14px; height: 14px; }
+.pf-avatar-edit { position: relative; border-radius: 50%; cursor: pointer; }
+.pf-avatar-edit .pf-avatar.big { width: 76px; height: 76px; font-size: 30px; }
+.pf-cam {
+  position: absolute; right: -2px; bottom: -2px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent); color: #111; box-shadow: 0 0 0 3px var(--menu);
+}
+.pf-cam svg { width: 14px; height: 14px; }
+.pf-link { align-self: flex-start; color: var(--accent); font-size: 12px; }
+.pf-link:hover { text-decoration: underline; }
+.modal p.pf-note { margin: 14px 0 0; font-size: 12.5px; }
+.pf-grow { flex: 1; }
+.pf-pop .pf-name.pf-under { padding: 8px 16px 0; }
+.pf-pop .pf-name.pf-under b { font-size: 16px; }

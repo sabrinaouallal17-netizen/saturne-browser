@@ -8,7 +8,20 @@ const on = (channel) => (cb) => {
 };
 
 contextBridge.exposeInMainWorld('saturne', {
-  partition: 'persist:saturne',
+  partition: ipcRenderer.sendSync('profile:partition'),
+
+  // profiles
+  profiles: () => ipcRenderer.sendSync('profile:list'),
+  saveProfile: (p) => ipcRenderer.invoke('profile:save', p),
+  createProfile: (p) => ipcRenderer.invoke('profile:create', p),
+  switchProfile: (id) => ipcRenderer.invoke('profile:switch', id),
+  deleteProfile: (id) => ipcRenderer.invoke('profile:delete', id),
+
+  // updates
+  updateStatus: () => ipcRenderer.sendSync('update:get'),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  onUpdate: on('update:status'),
 
   // window controls
   minimize: () => ipcRenderer.send('win:minimize'),
@@ -42,4 +55,10 @@ contextBridge.exposeInMainWorld('saturne', {
   onContextMenu: on('page:context-menu'),
   onShortcut: on('app:shortcut'),
   onDownload: on('download:update'),
+
+  // site permissions
+  onPermission: on('perm:ask'),
+  answerPermission: (id, allow, remember) => ipcRenderer.send('perm:answer', id, allow, remember),
+  listPermissions: () => ipcRenderer.sendSync('perm:list'),
+  forgetPermission: (origin, key) => ipcRenderer.send('perm:forget', origin, key),
 });

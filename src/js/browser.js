@@ -178,6 +178,14 @@
     wv.addEventListener('enter-html-full-screen', () => document.body.classList.add('page-fullscreen'));
     wv.addEventListener('leave-html-full-screen', () => document.body.classList.remove('page-fullscreen'));
     wv.addEventListener('focus', () => Menu.closeAll());
+    wv.addEventListener('found-in-page', (e) => Find.result(tab.id, e.result));
+    // page process crashed or frozen: Saturne shows its own screen with a Reload button
+    wv.addEventListener('render-process-gone', (e) => {
+      const reason = (e.details && e.details.reason) || e.reason || 'crashed';
+      if (reason !== 'clean-exit' && r.wv === wv) Crash.mark(tab.id, 'crashed');
+    });
+    wv.addEventListener('unresponsive', () => { if (r.wv === wv && !r.crashed) Crash.mark(tab.id, 'frozen'); });
+    wv.addEventListener('responsive', () => { if (r.wv === wv && r.crashed === 'frozen') Crash.mark(tab.id, null); });
 
     $('views').append(wv);
     return wv;
@@ -196,7 +204,7 @@
     if (!r || !r.wv) return;
     if (DevTools.tabId === id) DevTools.close(false);
     r.wv.remove();
-    Object.assign(r, { wv: null, wcId: null, loading: false, audible: false, thumb: null, cssKey: null });
+    Object.assign(r, { wv: null, wcId: null, loading: false, audible: false, thumb: null, cssKey: null, crashed: null });
     refreshTab(id);
   }
 
@@ -219,6 +227,7 @@
     for (const [id, r] of rt) if (r.wv) r.wv.classList.toggle('visible', id === currentTabId && !isHome(t));
     Home.show(isHome(t));
     document.body.classList.remove('page-fullscreen');
+    Find.sync(); Crash.sync(); Perms.sync();
   }
 
   function activateTab(id, { focus = true } = {}) {
@@ -971,6 +980,7 @@
             { label: 'Reset zoom', icon: Icons.search, shortcut: 'Ctrl+0', onClick: () => zoom(0) },
           ],
         },
+        { label: 'Find in page', icon: Icons.search, shortcut: 'Ctrl+F', disabled: !onPage, onClick: () => Find.open() },
         { label: 'History', icon: Icons.history, shortcut: 'Ctrl+H', onClick: openHistory },
         { label: 'Downloads', icon: Icons.download, onClick: () => openDownloads() },
         { sep: true },
@@ -996,6 +1006,8 @@
             { label: 'Expanded sidebar', checked: st.sidebarOpen, shortcut: 'Ctrl+Shift+S', onClick: toggleSidebar },
             { label: 'Show bookmarks bar', checked: st.showBookmarks, onClick: () => set('showBookmarks', !st.showBookmarks) },
             { label: 'Custom scrollbars on websites', checked: st.webScrollbars, onClick: () => { set('webScrollbars', !st.webScrollbars); toggleWebScrollbars(); } },
+            { sep: true },
+            { label: 'Site permissions…', icon: Icons.globe, onClick: () => Perms.manage() },
           ],
         },
         { label: DevTools.view ? 'Close developer tools' : 'Developer tools', icon: Icons.code, shortcut: 'F12', disabled: !(r && r.wv) && !DevTools.view, onClick: () => DevTools.toggle() },
@@ -1564,6 +1576,166 @@
     });
   }
 
+  // ======================= find in page (Ctrl+F) =======================
+  const Find = {
+    el: null, input: null, count: null, tabId: null,
+    build() {
+      if (this.el) return;
+      this.input = UI.h('input', { type: 'text', placeholder: 'Find in page', spellcheck: 'false', autocomplete: 'off' });
+      this.count = UI.h('span.find-count');
+      const btn = (icon, tip, fn) => UI.h('button.icon-btn', { html: icon, 'data-tip': tip, onclick: fn });
+      this.el = UI.h('div#findbar', null,
+        UI.h('span.find-ico', { html: Icons.search }), this.input, this.count,
+        btn(Icons.chevDown, 'Previous  (Shift+Enter)', () => this.step(false)),
+        btn(Icons.chevDown, 'Next  (Enter)', () => this.step(true)),
+        btn(Icons.x, 'Close  (Esc)', () => this.close()));
+      this.el.children[3].classList.add('up');
+      this.input.addEventListener('input', () => this.search());
+      this.input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); this.step(!e.shiftKey); }
+        else if (e.key === 'Escape') { e.preventDefault(); this.close(); }
+      });
+      $('content').append(this.el);
+    },
+    wv() { const r = this.tabId && rt.get(this.tabId); return r && r.wv; },
+    open() {
+      const wv = currentWv();
+      if (!wv || isHome(currentTab())) return;
+      this.build();
+      if (this.tabId && this.tabId !== currentTabId) this.stop();
+      this.tabId = currentTabId;
+      this.el.classList.add('open');
+      this.input.focus(); this.input.select();
+      if (this.input.value) this.search();
+    },
+    search() {
+      const wv = this.wv();
+      if (!wv) return;
+      const q = this.input.value;
+      if (!q) { wv.stopFindInPage('clearSelection'); this.show(null); return; }
+      wv.findInPage(q);
+    },
+    step(forward) {
+      const wv = this.wv(), q = this.input && this.input.value;
+      if (!wv || !q) return;
+      wv.findInPage(q, { forward, findNext: true });
+    },
+    result(tabId, res) {
+      if (tabId !== this.tabId || !this.el) return;
+      if (res.finalUpdate || res.matches) this.show(res);
+    },
+    show(res) {
+      this.count.textContent = !res ? '' : res.matches ? `${res.activeMatchOrdinal}/${res.matches}` : 'No results';
+      this.el.classList.toggle('none', !!res && !res.matches);
+    },
+    stop() { const wv = this.wv(); if (wv) { try { wv.stopFindInPage('keepSelection'); } catch {} } },
+    close() {
+      if (!this.el || !this.el.classList.contains('open')) return;
+      this.stop();
+      this.el.classList.remove('open');
+      const wv = this.wv(); this.tabId = null;
+      if (wv) wv.focus();
+    },
+    // called whenever the visible tab changes
+    sync() { if (this.tabId && this.tabId !== currentTabId) this.close(); },
+  };
+
+  // ======================= crashed / frozen pages =======================
+  const Crash = {
+    el: null,
+    mark(tabId, kind) { // kind: 'crashed' | 'frozen' | null
+      const r = rt.get(tabId);
+      if (!r) return;
+      r.crashed = kind;
+      if (kind === 'crashed') r.loading = false;
+      refreshTab(tabId);
+      if (tabId === currentTabId) this.sync();
+    },
+    sync() {
+      const t = currentTab(), r = currentTabId && rt.get(currentTabId);
+      const kind = !isHome(t) && r && r.wv ? r.crashed : null;
+      if (!kind) { if (this.el) this.el.classList.remove('open'); return; }
+      if (!this.el) { this.el = UI.h('div#crashpage'); $('content').append(this.el); }
+      const crashed = kind === 'crashed';
+      this.el.replaceChildren(UI.h('div.crash-box', null,
+        UI.h('div.crash-ico', { html: crashed ? Icons.info : Icons.unload }),
+        UI.h('h1', { text: crashed ? 'This page crashed' : 'This page isn’t responding' }),
+        UI.h('p.crash-host', { text: host(t.url) }),
+        UI.h('p', { text: crashed ? 'The rest of Saturne is fine. Reload to open the page again.' : 'You can wait for it to respond, or reload it.' }),
+        UI.h('div.actions', null,
+          crashed ? null : UI.h('button.s-btn.ghost', { text: 'Wait', onclick: () => this.mark(currentTabId, null) }),
+          UI.h('button.s-btn.primary', { html: Icons.reload + '<span>Reload</span>', onclick: () => this.reload(currentTabId) }))));
+      this.el.classList.add('open');
+    },
+    reload(tabId) {
+      const loc = locate(tabId);
+      if (!loc) return;
+      unloadTab(tabId);
+      R(tabId).crashed = null;
+      createWebview(loc.tab);
+      showView(); updateChrome();
+    },
+  };
+
+  // ======================= site permissions =======================
+  const PERM_TEXT = {
+    camera: 'Use your camera', microphone: 'Use your microphone', geolocation: 'Know your location',
+    notifications: 'Show notifications', 'clipboard-read': 'See text and images copied to the clipboard',
+    midi: 'Use your MIDI devices', midiSysex: 'Control your MIDI devices', 'idle-detection': 'Know when you’re actively using this device',
+    'window-management': 'Manage windows on all your displays',
+  };
+  const PERM_SHORT = { camera: 'Camera', microphone: 'Microphone', geolocation: 'Location', notifications: 'Notifications', 'clipboard-read': 'Clipboard',
+    midi: 'MIDI', midiSysex: 'MIDI control', 'idle-detection': 'Activity', 'window-management': 'Window management' };
+  const Perms = {
+    queue: [], el: null,
+    tabOf(wcId) { for (const [id, r] of rt) if (r.wcId === wcId && r.wv) return id; return null; },
+    ask(req) { this.queue.push(req); this.sync(); },
+    answer(req, allow, remember) {
+      this.queue = this.queue.filter((x) => x !== req);
+      window.saturne.answerPermission(req.id, allow, remember);
+      this.sync();
+    },
+    sync() {
+      // requests from tabs that were closed or unloaded are refused
+      for (const q of [...this.queue]) if (q.wcId != null && this.tabOf(q.wcId) == null) this.answer(q, false, false);
+      const cur = currentTabId && rt.get(currentTabId);
+      const req = this.queue.find((q) => cur && cur.wcId != null && q.wcId === cur.wcId);
+      if (!req) { if (this.el) this.el.classList.remove('open'); return; }
+      if (!this.el) { this.el = UI.h('div#permprompt'); $('content').append(this.el); }
+      const remember = UI.h('input', { type: 'checkbox', checked: true });
+      this.el.replaceChildren(
+        UI.h('div.perm-head', null, UI.h('span.perm-ico', { html: Icons.globe }), UI.h('b', { text: host(req.origin) }), UI.h('span', { text: ' wants to' })),
+        UI.h('ul', null, req.keys.map((k) => UI.h('li', { text: PERM_TEXT[k] || k }))),
+        UI.h('label.perm-remember', null, remember, UI.h('span', { text: 'Remember my choice for this site' })),
+        UI.h('div.actions', null,
+          UI.h('button.s-btn.ghost', { text: 'Block', onclick: () => this.answer(req, false, remember.checked) }),
+          UI.h('button.s-btn.primary', { text: 'Allow', onclick: () => this.answer(req, true, remember.checked) })));
+      this.el.classList.add('open');
+    },
+    manage() {
+      UI.modal({
+        title: 'Site permissions', wide: true,
+        body(box, close) {
+          const list = UI.h('div.perm-list');
+          const draw = () => {
+            const all = window.saturne.listPermissions() || {};
+            const sites = Object.keys(all).sort();
+            list.replaceChildren(...(sites.length ? sites.map((o) => UI.h('div.perm-row', null,
+              UI.h('b', { text: host(o) }),
+              UI.h('div.perm-chips', null, Object.entries(all[o]).map(([k, v]) => UI.h('span.perm-chip' + (v ? '.on' : '.off'), null,
+                UI.h('span', { text: (PERM_SHORT[k] || k) + (v ? ' · allowed' : ' · blocked') }),
+                UI.h('button', { html: Icons.x, title: 'Forget', onclick: () => { window.saturne.forgetPermission(o, k); draw(); } })))),
+              UI.h('button.s-btn.ghost', { text: 'Reset', onclick: () => { window.saturne.forgetPermission(o, null); draw(); } })))
+              : [UI.h('p', { text: 'No saved choices yet. When a site asks for your camera, microphone, location or notifications, your answer shows up here.' })]));
+          };
+          draw();
+          box.append(list, UI.h('div.actions', null, UI.h('button.s-btn.primary', { text: 'Done', onclick: close })));
+        },
+      });
+    },
+  };
+  window.saturne.onPermission((req) => Perms.ask(req));
+
   // ======================= keyboard shortcuts =======================
   function handleShortcut(k) {
     const key = k.key.toLowerCase();
@@ -1580,6 +1752,8 @@
     else if ((c && key === 'r') || key === 'f5') { if (wv) wv.reload(); }
     else if (c && key === 'd') toggleBookmark();
     else if (c && key === 'h') openHistory();
+    else if (c && !sh && key === 'f') Find.open();
+    else if (key === 'f3') { if (Find.tabId === currentTabId && Find.input && Find.input.value) Find.step(!sh); else Find.open(); }
     else if (c && key === 'tab') {
       const tabs = flatTabs(space());
       if (!tabs.length) return true;
@@ -1602,7 +1776,7 @@
     // let text fields keep their own Ctrl+A/C/V/X/Z etc.
     if (inText && k.control && !k.shift && ['a', 'c', 'v', 'x', 'z', 'y'].includes(keyL)) return;
     if (inText && k.alt) return;
-    if (!k.control && !k.alt && !['f5', 'f12'].includes(keyL)) return;
+    if (!k.control && !k.alt && !['f5', 'f12', 'f3'].includes(keyL)) return;
     if (handleShortcut(k)) e.preventDefault();
   });
 

@@ -1,13 +1,43 @@
 // Saturne Browser - Electron main process
-const { app, BrowserWindow, ipcMain, session, dialog, shell, clipboard, webContents, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog, shell, clipboard, webContents, screen, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 
-const PARTITION = 'persist:saturne';
 let win = null;
 
-const statePath = () => path.join(app.getPath('userData'), 'saturne-state.json');
+// ---------- Profiles ----------
+// Each profile has its own saved state (spaces, tabs, home page, theme), its own cookies/logins and its own
+// site permissions. The first profile ("default") keeps the files Saturne used before profiles existed.
+// Switching profile restarts Saturne on the other profile.
+const profilesPath = () => path.join(app.getPath('userData'), 'saturne-profiles.json');
+let profiles = null;
+function loadProfiles() {
+  if (profiles) return profiles;
+  try { profiles = JSON.parse(fs.readFileSync(profilesPath(), 'utf8')); } catch { profiles = null; }
+  if (!profiles || !Array.isArray(profiles.list) || !profiles.list.length) {
+    profiles = { active: 'default', list: [{ id: 'default', name: 'Me', avatar: '', banner: '', color: '#8fb0ff', created: Date.now() }] };
+  }
+  if (!profiles.list.find((p) => p.id === profiles.active)) profiles.active = profiles.list[0].id;
+  return profiles;
+}
+const saveProfiles = () => {
+  const tmp = profilesPath() + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(profiles));
+  fs.renameSync(tmp, profilesPath());
+};
+let ACTIVE = null; // profile used by this run (fixed until restart)
+const activeProfile = () => ACTIVE || (ACTIVE = loadProfiles().active);
+const profileDir = (id = activeProfile()) => {
+  const d = id === 'default' ? app.getPath('userData') : path.join(app.getPath('userData'), 'profiles', id);
+  fs.mkdirSync(d, { recursive: true });
+  return d;
+};
+const partitionFor = (id = activeProfile()) => (id === 'default' ? 'persist:saturne' : `persist:saturne-${id}`);
+const PARTITION_NOW = () => partitionFor();
+
+const statePath = () => path.join(profileDir(), 'saturne-state.json');
 
 function createWindow() {
   win = new BrowserWindow({
@@ -73,10 +103,10 @@ app.on('second-instance', () => {
 function isAppShortcut(i) {
   if (i.type !== 'keyDown') return false;
   const k = i.key.toLowerCase();
-  if (k === 'f5' || k === 'f12') return true;
+  if (k === 'f5' || k === 'f12' || k === 'f3') return true;
   if (i.alt && (k === 'arrowleft' || k === 'arrowright' || k === 'home')) return true;
   if (i.control && i.shift && ['t', 's', 'i', 'r'].includes(k)) return true;
-  if (i.control && !i.shift && ['t', 'w', 'l', 'r', 'd', 'h', '=', '+', '-', '0'].includes(k)) return true;
+  if (i.control && !i.shift && ['t', 'w', 'l', 'r', 'd', 'h', 'f', '=', '+', '-', '0'].includes(k)) return true;
   if (i.control && k === 'tab') return true;
   if (i.control && /^[1-9]$/.test(k)) return true;
   return false;
@@ -122,9 +152,96 @@ app.on('web-contents-created', (_e, contents) => {
   });
 });
 
+// ---------- Stay signed in ----------
+// Many sites keep you logged in with "session" cookies, which Chromium deletes when the browser closes.
+// Like Chrome's "Continue where you left off", Saturne turns them into cookies that last 30 days.
+const KEEP_DAYS = 30;
+function setupCookies(ses) {
+  ses.cookies.on('changed', (_e, c, _cause, removed) => {
+    if (removed || !c.session) return;
+    const domain = (c.domain || '').replace(/^\./, '');
+    if (!domain) return;
+    const details = {
+      url: `${c.secure ? 'https' : 'http'}://${domain}${c.path || '/'}`,
+      name: c.name, value: c.value, path: c.path, secure: c.secure, httpOnly: c.httpOnly,
+      expirationDate: Date.now() / 1000 + KEEP_DAYS * 86400,
+    };
+    if (c.sameSite && c.sameSite !== 'unspecified') details.sameSite = c.sameSite;
+    if (!c.hostOnly) details.domain = c.domain; // __Host- cookies must stay host-only
+    ses.cookies.set(details).catch(() => {});
+  });
+  app.on('before-quit', () => { ses.cookies.flushStore().catch(() => {}); });
+}
+
+// ---------- Site permissions (camera, microphone, location, notifications…) ----------
+const ALWAYS = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock']);
+const ASK = new Set(['media', 'geolocation', 'notifications', 'clipboard-read', 'midi', 'midiSysex', 'idle-detection', 'window-management']);
+const permPath = () => path.join(profileDir(), 'saturne-permissions.json');
+let perms = null; // { "https://site.com": { "camera": true, "notifications": false } }
+const loadPerms = () => {
+  if (perms) return perms;
+  try { perms = JSON.parse(fs.readFileSync(permPath(), 'utf8')) || {}; } catch { perms = {}; }
+  return perms;
+};
+const savePerms = () => fs.promises.writeFile(permPath(), JSON.stringify(perms, null, 1)).catch(() => {});
+const originOf = (u) => { try { return new URL(u).origin; } catch { return ''; } };
+// "media" covers camera and/or microphone: each is remembered on its own
+const permKeys = (permission, details) => {
+  if (permission !== 'media') return [permission];
+  const t = (details && details.mediaTypes) || [];
+  const keys = [];
+  if (t.includes('video')) keys.push('camera');
+  if (t.includes('audio')) keys.push('microphone');
+  return keys.length ? keys : ['camera', 'microphone'];
+};
+const pending = new Map();
+let permSeq = 0;
+
+function setupPermissions(ses) {
+  loadPerms();
+  ses.setPermissionRequestHandler((wc, permission, cb, details) => {
+    if (ALWAYS.has(permission)) return cb(true);
+    if (!ASK.has(permission)) return cb(false);
+    const origin = originOf((details && details.requestingUrl) || (wc && wc.getURL()));
+    if (!origin || !/^https?:/.test(origin) || !win) return cb(false);
+    const keys = permKeys(permission, details);
+    const saved = keys.map((k) => perms[origin] && perms[origin][k]);
+    if (saved.every((v) => v === true)) return cb(true);
+    if (saved.some((v) => v === false)) return cb(false);
+    const id = ++permSeq;
+    pending.set(id, { cb, origin, keys });
+    win.webContents.send('perm:ask', { id, wcId: wc ? wc.id : null, origin, keys });
+  });
+  ses.setPermissionCheckHandler((_wc, permission, origin, details) => {
+    if (ALWAYS.has(permission)) return true;
+    const o = originOf(origin || (details && details.requestingUrl));
+    const keys = permission === 'media' ? permKeys('media', { mediaTypes: details && details.mediaType ? [details.mediaType] : [] }) : [permission];
+    return keys.every((k) => perms[o] && perms[o][k] === true);
+  });
+}
+ipcMain.on('perm:answer', (_e, id, allow, remember) => {
+  const p = pending.get(id);
+  if (!p) return;
+  pending.delete(id);
+  if (remember) {
+    perms[p.origin] = perms[p.origin] || {};
+    for (const k of p.keys) perms[p.origin][k] = !!allow;
+    savePerms();
+  }
+  p.cb(!!allow);
+});
+ipcMain.on('perm:list', (e) => { e.returnValue = loadPerms(); });
+ipcMain.on('perm:forget', (_e, origin, key) => {
+  loadPerms();
+  if (!perms[origin]) return;
+  if (key) delete perms[origin][key]; else delete perms[origin];
+  if (perms[origin] && !Object.keys(perms[origin]).length) delete perms[origin];
+  savePerms();
+});
+
 // ---------- Session setup (user agent, permissions, downloads) ----------
 function setupSession() {
-  const ses = session.fromPartition(PARTITION);
+  const ses = session.fromPartition(PARTITION_NOW());
 
   // Remove "Electron" & app name tokens so sites treat us like a normal Chromium browser
   const ua = ses.getUserAgent()
@@ -132,8 +249,8 @@ function setupSession() {
     .replace(/\ssaturne-browser\/\S+/i, '');
   ses.setUserAgent(ua);
 
-  const allowed = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock']);
-  ses.setPermissionRequestHandler((_wc, permission, cb) => cb(allowed.has(permission)));
+  setupCookies(ses);
+  setupPermissions(ses);
 
   let dlId = 0;
   const items = new Map();
@@ -219,7 +336,7 @@ ipcMain.handle('favicon:data', async (_e, url) => {
   if (!/^https?:\/\//i.test(url || '')) return null;
   if (faviconCache.has(url)) return faviconCache.get(url);
   try {
-    const res = await session.fromPartition(PARTITION).fetch(url);
+    const res = await session.fromPartition(PARTITION_NOW()).fetch(url);
     if (!res.ok) return null;
     const type = res.headers.get('content-type') || 'image/png';
     const buf = Buffer.from(await res.arrayBuffer());
@@ -267,11 +384,168 @@ ipcMain.on('shell:open-path', (_e, p) => shell.openPath(p));
 ipcMain.on('shell:show-item', (_e, p) => shell.showItemInFolder(p));
 ipcMain.on('shell:open-downloads', () => shell.openPath(app.getPath('downloads')));
 
+// ---------- Profiles (IPC) ----------
+const isImage = (s) => s === '' || (typeof s === 'string' && /^data:image\/(png|jpeg|webp|gif);base64,/.test(s) && s.length < 3_000_000);
+const cleanProfile = (p, base) => {
+  const out = { ...base };
+  if (typeof p.name === 'string') out.name = p.name.trim().slice(0, 32) || base.name || 'Profile';
+  if (isImage(p.avatar)) out.avatar = p.avatar;
+  if (isImage(p.banner) || /^g:\d{1,2}$/.test(p.banner || '')) out.banner = p.banner; // picture or preset gradient
+  if (typeof p.color === 'string' && /^#[0-9a-f]{6}$/i.test(p.color)) out.color = p.color;
+  return out;
+};
+ipcMain.on('profile:partition', (e) => { e.returnValue = PARTITION_NOW(); });
+ipcMain.on('profile:list', (e) => { const p = loadProfiles(); e.returnValue = { active: activeProfile(), list: p.list }; });
+ipcMain.handle('profile:save', (_e, data) => {
+  const p = loadProfiles();
+  const i = p.list.findIndex((x) => x.id === data.id);
+  if (i < 0) return null;
+  p.list[i] = cleanProfile(data, p.list[i]);
+  saveProfiles();
+  return p.list[i];
+});
+ipcMain.handle('profile:create', (_e, data) => {
+  const p = loadProfiles();
+  if (p.list.length >= 12) return null;
+  const id = Math.random().toString(36).slice(2, 10);
+  const prof = cleanProfile(data || {}, { id, name: 'Profile', avatar: '', banner: '', color: '#ff8fa3', created: Date.now() });
+  p.list.push(prof);
+  saveProfiles();
+  return prof;
+});
+ipcMain.handle('profile:switch', (_e, id) => {
+  const p = loadProfiles();
+  if (!p.list.find((x) => x.id === id) || id === activeProfile()) return false;
+  p.active = id;
+  saveProfiles();
+  app.relaunch();
+  app.quit();
+  return true;
+});
+ipcMain.handle('profile:delete', async (_e, id) => {
+  const p = loadProfiles();
+  if (id === 'default' || id === activeProfile() || !p.list.find((x) => x.id === id)) return false;
+  p.list = p.list.filter((x) => x.id !== id);
+  saveProfiles();
+  // erase that profile's data: saved state, permissions, cookies and site storage
+  try { await session.fromPartition(partitionFor(id)).clearStorageData(); } catch {}
+  await fs.promises.rm(path.join(app.getPath('userData'), 'profiles', id), { recursive: true, force: true }).catch(() => {});
+  return true;
+});
+
+// ---------- Updates from GitHub ----------
+// Saturne compares the latest commit of the repository's main branch with the one it was installed from.
+// "Update Available" installs the new files (the app is plain JavaScript, nothing to compile) and restarts.
+const REPO = 'sabrinaouallal17-netizen/saturne-browser';
+const BRANCH = 'main';
+const KEEP_OUT = new Set(['node_modules', '.git', '.github', 'dist', 'out', '.gitignore']);
+// installed commit: next to the app files once installed, in the profile folder when running from source
+const buildFile = () => (app.isPackaged ? path.join(__dirname, 'saturne-build.json') : path.join(app.getPath('userData'), 'saturne-build-dev.json'));
+const readBuild = () => { try { return JSON.parse(fs.readFileSync(buildFile(), 'utf8')); } catch { return {}; } };
+let upd = { state: 'idle', available: null, error: null, installed: null };
+const sendUpd = () => { if (win) win.webContents.send('update:status', { ...upd, canInstall: app.isPackaged }); };
+
+async function checkUpdate() {
+  if (upd.state === 'installing') return upd;
+  upd.state = 'checking'; sendUpd();
+  try {
+    const res = await net.fetch(`https://api.github.com/repos/${REPO}/commits/${BRANCH}`, {
+      headers: { 'User-Agent': 'Saturne-Browser', Accept: 'application/vnd.github+json' },
+    });
+    if (res.status === 404) throw new Error('The GitHub repository is private or doesn’t exist, so Saturne can’t check it.');
+    if (!res.ok) throw new Error(`GitHub answered ${res.status}.`);
+    const c = await res.json();
+    const build = readBuild();
+    if (!build.sha) { // first check after installing: the current files count as this commit
+      build.sha = c.sha; build.date = c.commit && c.commit.committer && c.commit.committer.date;
+      fs.writeFileSync(buildFile(), JSON.stringify(build));
+    }
+    upd.installed = build.sha;
+    upd.available = build.sha !== c.sha
+      ? { sha: c.sha, message: ((c.commit && c.commit.message) || '').split('\n')[0].slice(0, 200), date: c.commit && c.commit.committer && c.commit.committer.date }
+      : null;
+    upd.state = upd.available ? 'available' : 'uptodate'; upd.error = null;
+  } catch (err) {
+    upd.state = 'error'; upd.error = err.message;
+  }
+  sendUpd();
+  return upd;
+}
+
+const run = (file, args) => new Promise((resolve, reject) =>
+  execFile(file, args, { windowsHide: true }, (err) => (err ? reject(err) : resolve())));
+
+async function installUpdate() {
+  if (!app.isPackaged) throw new Error('Saturne is running from its source folder: use git pull there instead.');
+  const a = upd.available;
+  if (!a) throw new Error('No update to install.');
+  upd.state = 'installing'; sendUpd();
+  const tmp = await fs.promises.mkdtemp(path.join(app.getPath('temp'), 'saturne-update-'));
+  try {
+    const res = await net.fetch(`https://codeload.github.com/${REPO}/zip/${a.sha}`, { headers: { 'User-Agent': 'Saturne-Browser' } });
+    if (!res.ok) throw new Error(`Download failed (${res.status}).`);
+    const zip = path.join(tmp, 'update.zip');
+    await fs.promises.writeFile(zip, Buffer.from(await res.arrayBuffer()));
+    const out = path.join(tmp, 'x');
+    await fs.promises.mkdir(out);
+    await run(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-xf', zip, '-C', out]);
+    const [top] = await fs.promises.readdir(out);
+    const root = path.join(out, top || '');
+    for (const f of ['main.js', 'preload.js', 'package.json', path.join('src', 'index.html')]) {
+      if (!fs.existsSync(path.join(root, f))) throw new Error(`The update is incomplete (${f} is missing).`);
+    }
+    // a different Electron version can't be swapped in place: that needs a fresh install
+    const pkg = JSON.parse(await fs.promises.readFile(path.join(root, 'package.json'), 'utf8'));
+    const want = String((pkg.devDependencies && pkg.devDependencies.electron) || (pkg.dependencies && pkg.dependencies.electron) || '').match(/\d+/);
+    if (want && want[0] !== process.versions.electron.split('.')[0]) {
+      throw new Error(`This update needs Electron ${want[0]} (installed: ${process.versions.electron}). Reinstall Saturne from the new version.`);
+    }
+    // keep a copy of the current files, then copy the new ones over them
+    const backup = path.join(path.dirname(__dirname), 'app-previous');
+    await fs.promises.rm(backup, { recursive: true, force: true });
+    await fs.promises.cp(__dirname, backup, { recursive: true });
+    for (const name of await fs.promises.readdir(root)) {
+      if (KEEP_OUT.has(name)) continue;
+      await fs.promises.cp(path.join(root, name), path.join(__dirname, name), { recursive: true, force: true });
+    }
+    fs.writeFileSync(buildFile(), JSON.stringify({ sha: a.sha, date: a.date, installedAt: new Date().toISOString() }));
+  } catch (err) {
+    upd.state = 'available'; upd.error = err.message; sendUpd();
+    throw err;
+  } finally {
+    fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+  app.relaunch();
+  app.quit();
+}
+ipcMain.handle('update:check', () => checkUpdate());
+ipcMain.handle('update:install', async () => {
+  try { await installUpdate(); return { ok: true }; } catch (err) { return { error: err.message }; }
+});
+ipcMain.on('update:get', (e) => { e.returnValue = { ...upd, canInstall: app.isPackaged }; });
+
 // ---------- App lifecycle ----------
+// storage of deleted profiles can only be removed once it's no longer open: done at the next start
+function sweepDeletedProfiles() {
+  const ids = new Set(loadProfiles().list.map((p) => p.id));
+  const dir = path.join(app.getPath('userData'), 'Partitions');
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return; }
+  for (const n of names) {
+    const m = /^saturne-(.+)$/.exec(n);
+    if (m && !ids.has(m[1])) fs.rm(path.join(dir, n), { recursive: true, force: true }, () => {});
+  }
+}
+
 app.whenReady().then(() => {
+  activeProfile();
+  sweepDeletedProfiles();
   setupSession();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  // look for updates shortly after starting, then every 30 minutes
+  setTimeout(checkUpdate, 8000);
+  setInterval(checkUpdate, 30 * 60 * 1000);
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
