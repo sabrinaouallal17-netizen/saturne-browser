@@ -204,7 +204,7 @@
     if (!r || !r.wv) return;
     if (DevTools.tabId === id) DevTools.close(false);
     r.wv.remove();
-    Object.assign(r, { wv: null, wcId: null, loading: false, audible: false, thumb: null, cssKey: null, crashed: null });
+    Object.assign(r, { wv: null, wcId: null, loading: false, audible: false, thumb: null, cssKey: null, crashed: null, muted: false });
     refreshTab(id);
   }
 
@@ -320,7 +320,7 @@
     if (isHome(t)) { $('url-input').focus(); return; }
     if (DevTools.tabId === t.id) DevTools.close(false);
     const r = rt.get(t.id);
-    if (r && r.wv) { r.wv.remove(); Object.assign(r, { wv: null, wcId: null, loading: false, audible: false, thumb: null, failedUrl: null }); }
+    if (r && r.wv) { r.wv.remove(); Object.assign(r, { wv: null, wcId: null, loading: false, audible: false, thumb: null, failedUrl: null, muted: false }); }
     t.url = HOME; t.title = 'New Tab'; t.favicon = '';
     showView(); refreshTab(t.id); updateChrome(); Store.save();
     setTimeout(() => $('url-input').focus(), 20);
@@ -623,8 +623,23 @@
     if (rt_.textContent !== title) rt_.textContent = title;
     if (app.classList.contains('compact')) row.dataset.tip = title; else delete row.dataset.tip;
     let au = row.querySelector('.audio');
-    if (r && r.audible && !au) row.querySelector('.rx').before(h('span.audio', { html: Icons.speaker }));
-    if (!(r && r.audible) && au) au.remove();
+    const showAudio = r && r.wv && (r.audible || r.muted);
+    if (showAudio && !au) {
+      au = h('button.audio', { html: Icons.speaker });
+      au.addEventListener('click', (e) => { e.stopPropagation(); toggleMute(tab.id); });
+      row.querySelector('.rx').before(au);
+    }
+    if (!showAudio && au) au.remove();
+    if (showAudio) { au.classList.toggle('muted', !!r.muted); au.dataset.tip = r.muted ? 'Unmute tab' : 'Mute tab'; }
+  }
+
+  // click the speaker of a tab to mute / unmute it
+  function toggleMute(id) {
+    const r = rt.get(id);
+    if (!r || !r.wv) return;
+    r.muted = !r.muted;
+    try { r.wv.setAudioMuted(r.muted); } catch {}
+    refreshTab(id);
   }
 
   function tabRow(tab) {
@@ -1008,8 +1023,10 @@
             { label: 'Custom scrollbars on websites', checked: st.webScrollbars, onClick: () => { set('webScrollbars', !st.webScrollbars); toggleWebScrollbars(); } },
             { sep: true },
             { label: 'Site permissions…', icon: Icons.globe, onClick: () => Perms.manage() },
+            { label: isDefault ? 'Saturne is your default browser' : 'Make Saturne the default browser…', icon: Icons.saturn, checked: isDefault, disabled: isDefault, onClick: makeDefault },
           ],
         },
+        { label: 'Print…', icon: Icons.file, shortcut: 'Ctrl+P', disabled: !onPage, onClick: printPage },
         { label: DevTools.view ? 'Close developer tools' : 'Developer tools', icon: Icons.code, shortcut: 'F12', disabled: !(r && r.wv) && !DevTools.view, onClick: () => DevTools.toggle() },
         { sep: true },
         { label: 'About Saturne', icon: Icons.info, onClick: about },
@@ -1576,6 +1593,29 @@
     });
   }
 
+  // ======================= default browser & printing =======================
+  let isDefault = false;
+  const refreshDefault = () => window.saturne.isDefaultBrowser().then((v) => { isDefault = v; }).catch(() => {});
+  refreshDefault();
+  window.addEventListener('focus', refreshDefault); // the user may have changed it in Windows settings
+  async function makeDefault() {
+    const r = await window.saturne.makeDefaultBrowser();
+    if (r && r.error) return UI.toast('Couldn’t register Saturne: ' + r.error, 5000);
+    UI.modal({
+      title: 'Almost done',
+      body(box, close) {
+        box.append(
+          UI.h('p', { text: 'Windows opened its “Default apps” page for Saturne. Click “Set default” at the top of that page (or choose Saturne for HTTP and HTTPS).' }),
+          UI.h('p', { text: 'Links you click in other apps will then open in Saturne.' }),
+          UI.h('div.actions', null, UI.h('button.s-btn.primary', { text: 'OK', onclick: () => { close(); refreshDefault(); } })));
+      },
+    });
+  }
+  function printPage() {
+    const wv = currentWv();
+    if (wv && !isHome(currentTab())) { try { wv.print(); } catch {} }
+  }
+
   // ======================= find in page (Ctrl+F) =======================
   const Find = {
     el: null, input: null, count: null, tabId: null,
@@ -1753,6 +1793,7 @@
     else if (c && key === 'd') toggleBookmark();
     else if (c && key === 'h') openHistory();
     else if (c && !sh && key === 'f') Find.open();
+    else if (c && !sh && key === 'p') printPage();
     else if (key === 'f3') { if (Find.tabId === currentTabId && Find.input && Find.input.value) Find.step(!sh); else Find.open(); }
     else if (c && key === 'tab') {
       const tabs = flatTabs(space());

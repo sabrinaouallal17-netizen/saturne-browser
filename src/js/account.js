@@ -29,30 +29,101 @@
     return { backgroundImage: `linear-gradient(135deg, ${a}, ${b})` };
   }
 
-  // pick an image file and shrink it (square crop for the photo, wide crop for the banner)
+  // pick an image file, then let the user crop it (round frame for the photo, wide frame for the banner)
   function pickImage(w, hgt) {
     return new Promise((resolve) => {
       const inp = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif' });
       inp.addEventListener('change', () => {
         const f = inp.files && inp.files[0];
         if (!f) return resolve(null);
-        const img = new Image();
-        img.onload = () => {
-          const c = document.createElement('canvas');
-          c.width = w; c.height = hgt;
-          const s = Math.max(w / img.width, hgt / img.height);
-          const dw = img.width * s, dh = img.height * s;
-          c.getContext('2d').drawImage(img, (w - dw) / 2, (hgt - dh) / 2, dw, dh);
-          resolve(c.toDataURL('image/jpeg', 0.88));
-        };
-        img.onerror = () => { UI.toast('This image can’t be opened'); resolve(null); };
         if (f.size > 25 * 1024 * 1024) { UI.toast('This image is too big (25 MB max)'); return resolve(null); }
+        const img = new Image();
+        img.onload = () => cropImage(img, w, hgt).then(resolve);
+        img.onerror = () => { UI.toast('This image can’t be opened'); resolve(null); };
         const rd = new FileReader();
         rd.onload = () => { img.src = rd.result; };
         rd.onerror = () => resolve(null);
         rd.readAsDataURL(f);
       });
       inp.click();
+    });
+  }
+
+  // ---------- crop tool: drag to move, wheel / slider to zoom ----------
+  function cropImage(img, outW, outH) {
+    return new Promise((resolve) => {
+      const round = outW === outH;
+      const frameW = round ? 260 : 540, frameH = Math.round(frameW * outH / outW);
+      const stageW = round ? 440 : 580, stageH = frameH + (round ? 60 : 120);
+      const fx = (stageW - frameW) / 2, fy = (stageH - frameH) / 2;
+      const cover = Math.max(frameW / img.naturalWidth, frameH / img.naturalHeight);
+      let zoom = 1, x = 0, y = 0; // image position (px, stage coords) and zoom relative to "cover"
+      const pic = h('img.crop-img', { src: img.src, draggable: 'false' });
+      const frame = h('div.crop-frame' + (round ? '.round' : ''), { style: { left: fx + 'px', top: fy + 'px', width: frameW + 'px', height: frameH + 'px' } });
+      const stage = h('div.crop-stage', { style: { width: stageW + 'px', height: stageH + 'px' } }, pic, frame);
+      const slider = UI.range({ min: 100, max: 400, step: 1, value: 100, onInput: (v) => zoomTo(v / 100) });
+      const scale = () => cover * zoom;
+      // keep the frame always filled by the picture
+      const clampPos = () => {
+        const w = img.naturalWidth * scale(), hh = img.naturalHeight * scale();
+        x = Math.min(fx, Math.max(fx + frameW - w, x));
+        y = Math.min(fy, Math.max(fy + frameH - hh, y));
+      };
+      const paint = () => {
+        clampPos();
+        Object.assign(pic.style, { width: img.naturalWidth * scale() + 'px', height: img.naturalHeight * scale() + 'px', transform: `translate(${x}px, ${y}px)` });
+      };
+      // zoom around a point (the frame center by default)
+      function zoomTo(z, cx = fx + frameW / 2, cy = fy + frameH / 2) {
+        z = Math.min(4, Math.max(1, z));
+        const k = z / zoom;
+        x = cx - (cx - x) * k; y = cy - (cy - y) * k;
+        zoom = z; slider.value = Math.round(z * 100);
+        slider.style.setProperty('--p', ((z - 1) / 3) * 100 + '%');
+        paint();
+      }
+      // start centered
+      x = fx + (frameW - img.naturalWidth * cover) / 2;
+      y = fy + (frameH - img.naturalHeight * cover) / 2;
+      paint();
+
+      let drag = null;
+      stage.addEventListener('pointerdown', (e) => { drag = { px: e.clientX, py: e.clientY, x, y }; stage.setPointerCapture(e.pointerId); stage.classList.add('grabbing'); });
+      stage.addEventListener('pointermove', (e) => { if (!drag) return; x = drag.x + e.clientX - drag.px; y = drag.y + e.clientY - drag.py; paint(); });
+      const end = () => { drag = null; stage.classList.remove('grabbing'); };
+      stage.addEventListener('pointerup', end); stage.addEventListener('pointercancel', end);
+      stage.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const r = stage.getBoundingClientRect();
+        zoomTo(zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1), e.clientX - r.left, e.clientY - r.top);
+      }, { passive: false });
+
+      // own overlay (not UI.modal) so Esc closes only the crop tool, not the profile editor under it
+      const finish = (ok) => {
+        back.remove();
+        window.removeEventListener('keydown', onKey, true);
+        if (!ok) return resolve(null);
+        const c = document.createElement('canvas');
+        c.width = outW; c.height = outH;
+        const s = scale();
+        c.getContext('2d').drawImage(img, (fx - x) / s, (fy - y) / s, frameW / s, frameH / s, 0, 0, outW, outH);
+        resolve(c.toDataURL('image/jpeg', 0.9));
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); finish(false); }
+        else if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); finish(true); }
+      };
+      window.addEventListener('keydown', onKey, true);
+      const box = h('div.modal.crop-modal', { style: { width: stageW + 40 + 'px' } },
+        h('h3', { text: round ? 'Crop your photo' : 'Crop your banner' }),
+        stage,
+        h('div.crop-zoom', null, h('span.ico', { html: Icons.zoomOut }), slider, h('span.ico', { html: Icons.zoomIn })),
+        h('p.crop-hint', { text: 'Drag to move · scroll to zoom' }),
+        h('div.actions', null,
+          h('button.s-btn.ghost', { text: 'Cancel', onclick: () => finish(false) }),
+          h('button.s-btn.primary', { text: 'Apply', onclick: () => finish(true) })));
+      const back = h('div.modal-back.crop-back', null, box);
+      document.getElementById('layer').append(back);
     });
   }
 

@@ -39,10 +39,50 @@ const PARTITION_NOW = () => partitionFor();
 
 const statePath = () => path.join(profileDir(), 'saturne-state.json');
 
+// ---------- Window size & position are remembered ----------
+const winStatePath = () => path.join(app.getPath('userData'), 'saturne-window.json');
+function loadWinState() {
+  try {
+    const s = JSON.parse(fs.readFileSync(winStatePath(), 'utf8'));
+    // only reuse a position that is still on a connected screen
+    const visible = screen.getAllDisplays().some((d) => {
+      const a = d.workArea;
+      return s.x + 100 < a.x + a.width && s.x + s.width - 100 > a.x && s.y >= a.y - 10 && s.y + 40 < a.y + a.height;
+    });
+    return visible ? s : { width: s.width, height: s.height, maximized: s.maximized };
+  } catch { return { width: 1440, height: 860 }; }
+}
+let winSaveT = null;
+function saveWinState() {
+  clearTimeout(winSaveT);
+  winSaveT = setTimeout(() => {
+    if (!win || win.isDestroyed() || win.isMinimized() || win.isFullScreen()) return;
+    const b = win.getNormalBounds();
+    fs.promises.writeFile(winStatePath(), JSON.stringify({ ...b, maximized: win.isMaximized() })).catch(() => {});
+  }, 400);
+}
+
+// ---------- Links opened from other apps (Saturne as default browser) ----------
+function urlFromArgs(argv) {
+  const skip = new Set([process.execPath.toLowerCase(), app.getAppPath().toLowerCase()]);
+  for (const a of argv.slice(1)) {
+    if (!a || a.startsWith('-') || skip.has(path.resolve(a).toLowerCase()) || a === '.') continue;
+    if (/^(https?|ftp):\/\//i.test(a)) return a;
+    if (/^[a-z]:[\\/]|^\\\\/i.test(a) && /\.(html?|xhtml|svg|txt|pdf)$/i.test(a) && fs.existsSync(a)) return pathToFileURL(a).href;
+  }
+  return null;
+}
+let pendingUrl = urlFromArgs(process.argv);
+// restart without the link Saturne may have been opened with (so it isn't opened twice)
+const relaunchClean = () => app.relaunch({ args: process.argv.slice(1).filter((x) => !/^(https?|ftp):\/\//i.test(x) && !/\.(html?|xhtml|svg|txt|pdf)$/i.test(x)) });
+const openExternalUrl = (url) => { if (url && win) win.webContents.send('tab:open', { url, background: false }); };
+
 function createWindow() {
+  const ws = loadWinState();
   win = new BrowserWindow({
-    width: 1440,
-    height: 860,
+    width: ws.width || 1440,
+    height: ws.height || 860,
+    ...(ws.x != null && ws.y != null ? { x: ws.x, y: ws.y } : {}),
     minWidth: 820,
     minHeight: 520,
     frame: false,
@@ -60,7 +100,14 @@ function createWindow() {
   });
 
   win.loadFile(path.join(__dirname, 'src', 'index.html'));
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => { if (ws.maximized) win.maximize(); win.show(); });
+  win.webContents.once('did-finish-load', () => { if (pendingUrl) { openExternalUrl(pendingUrl); pendingUrl = null; } });
+  for (const ev of ['resize', 'move', 'maximize', 'unmaximize']) win.on(ev, saveWinState);
+  // mouse side buttons (back / forward)
+  win.on('app-command', (_e, cmd) => {
+    if (cmd === 'browser-backward') win.webContents.send('app:shortcut', { key: 'ArrowLeft', alt: true });
+    else if (cmd === 'browser-forward') win.webContents.send('app:shortcut', { key: 'ArrowRight', alt: true });
+  });
 
   const sendMax = () => win && win.webContents.send('win:maximized', win.isMaximized());
   win.on('maximize', sendMax);
@@ -93,10 +140,52 @@ if (process.platform === 'win32') app.setAppUserModelId('Saturne.Browser');
 
 // only one Saturne window at a time: launching again focuses the existing one
 if (!app.requestSingleInstanceLock()) app.quit();
-app.on('second-instance', () => {
+app.on('second-instance', (_e, argv) => {
   if (!win) return;
   if (win.isMinimized()) win.restore();
   win.focus();
+  openExternalUrl(urlFromArgs(argv)); // a link clicked in another app
+});
+
+// ---------- Default browser (Windows) ----------
+// Registers Saturne in the user's registry like other browsers, then opens Windows' "Default apps" page on it.
+const REG = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe');
+const regAdd = (key, name, value) => run(REG, ['add', key, ...(name == null ? ['/ve'] : ['/v', name]), '/t', 'REG_SZ', '/d', value, '/f']);
+function launchCommand(arg) {
+  const exe = `"${process.execPath}"`;
+  const app_ = app.isPackaged ? '' : ` "${app.getAppPath()}"`;
+  return exe + app_ + (arg ? ` ${arg}` : '');
+}
+async function registerBrowser() {
+  const icon = `${process.execPath},0`;
+  const cls = 'HKCU\\Software\\Classes\\SaturneHTML';
+  const cl = 'HKCU\\Software\\Clients\\StartMenuInternet\\Saturne';
+  await regAdd(cls, null, 'Saturne HTML Document');
+  await regAdd(cls, 'AppUserModelId', 'Saturne.Browser');
+  await regAdd(`${cls}\\DefaultIcon`, null, icon);
+  await regAdd(`${cls}\\shell\\open\\command`, null, launchCommand('"%1"'));
+  await regAdd(cl, null, 'Saturne');
+  await regAdd(`${cl}\\DefaultIcon`, null, icon);
+  await regAdd(`${cl}\\shell\\open\\command`, null, launchCommand());
+  await regAdd(`${cl}\\Capabilities`, 'ApplicationName', 'Saturne');
+  await regAdd(`${cl}\\Capabilities`, 'ApplicationDescription', 'Saturne web browser');
+  await regAdd(`${cl}\\Capabilities`, 'ApplicationIcon', icon);
+  await regAdd(`${cl}\\Capabilities\\StartMenu`, 'StartMenuInternet', 'Saturne');
+  for (const p of ['http', 'https']) await regAdd(`${cl}\\Capabilities\\URLAssociations`, p, 'SaturneHTML');
+  for (const x of ['.htm', '.html', '.xhtml', '.svg']) await regAdd(`${cl}\\Capabilities\\FileAssociations`, x, 'SaturneHTML');
+  await regAdd('HKCU\\Software\\RegisteredApplications', 'Saturne', 'Software\\Clients\\StartMenuInternet\\Saturne\\Capabilities');
+}
+const isDefaultBrowser = () => new Promise((resolve) =>
+  execFile(REG, ['query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice', '/v', 'ProgId'],
+    { windowsHide: true }, (err, out) => resolve(!err && /SaturneHTML/.test(String(out)))));
+ipcMain.handle('browser:is-default', () => isDefaultBrowser());
+ipcMain.handle('browser:make-default', async () => {
+  try {
+    await registerBrowser();
+    // Windows only lets the user pick the default browser: open the settings page for Saturne
+    await shell.openExternal('ms-settings:defaultapps?registeredAppUser=Saturne');
+    return { ok: true, packaged: app.isPackaged };
+  } catch (err) { return { error: err.message }; }
 });
 
 // ---------- Shortcuts that must work even when a web page has focus ----------
@@ -106,7 +195,7 @@ function isAppShortcut(i) {
   if (k === 'f5' || k === 'f12' || k === 'f3') return true;
   if (i.alt && (k === 'arrowleft' || k === 'arrowright' || k === 'home')) return true;
   if (i.control && i.shift && ['t', 's', 'i', 'r'].includes(k)) return true;
-  if (i.control && !i.shift && ['t', 'w', 'l', 'r', 'd', 'h', 'f', '=', '+', '-', '0'].includes(k)) return true;
+  if (i.control && !i.shift && ['t', 'w', 'l', 'r', 'd', 'h', 'f', 'p', '=', '+', '-', '0'].includes(k)) return true;
   if (i.control && k === 'tab') return true;
   if (i.control && /^[1-9]$/.test(k)) return true;
   return false;
@@ -116,8 +205,9 @@ app.on('web-contents-created', (_e, contents) => {
   if (contents.getType() !== 'webview') return;
 
   // target=_blank / window.open -> open as a new tab instead of a new window
-  contents.setWindowOpenHandler(({ url }) => {
-    if (win) win.webContents.send('tab:open', { url, background: false });
+  // Ctrl+click / middle-click on a link opens it in the background
+  contents.setWindowOpenHandler(({ url, disposition }) => {
+    if (win) win.webContents.send('tab:open', { url, background: disposition === 'background-tab' });
     return { action: 'deny' };
   });
 
@@ -418,7 +508,7 @@ ipcMain.handle('profile:switch', (_e, id) => {
   if (!p.list.find((x) => x.id === id) || id === activeProfile()) return false;
   p.active = id;
   saveProfiles();
-  app.relaunch();
+  relaunchClean();
   app.quit();
   return true;
 });
@@ -515,7 +605,7 @@ async function installUpdate() {
   } finally {
     fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
-  app.relaunch();
+  relaunchClean();
   app.quit();
 }
 ipcMain.handle('update:check', () => checkUpdate());

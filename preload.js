@@ -10,6 +10,10 @@ const on = (channel) => (cb) => {
 contextBridge.exposeInMainWorld('saturne', {
   partition: ipcRenderer.sendSync('profile:partition'),
 
+  // default browser
+  isDefaultBrowser: () => ipcRenderer.invoke('browser:is-default'),
+  makeDefaultBrowser: () => ipcRenderer.invoke('browser:make-default'),
+
   // profiles
   profiles: () => ipcRenderer.sendSync('profile:list'),
   saveProfile: (p) => ipcRenderer.invoke('profile:save', p),
