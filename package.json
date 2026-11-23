@@ -1,0 +1,15 @@
+{
+  "name": "saturne-browser",
+  "productName": "Saturne",
+  "version": "1.0.0",
+  "description": "Saturne - a custom web browser built with Electron (school project)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^39.8.10"
+  }
+}

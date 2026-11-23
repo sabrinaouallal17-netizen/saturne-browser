@@ -1,0 +1,277 @@
+// Saturne Browser - Electron main process
+const { app, BrowserWindow, ipcMain, session, dialog, shell, clipboard, webContents, screen } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const { pathToFileURL } = require('url');
+
+const PARTITION = 'persist:saturne';
+let win = null;
+
+const statePath = () => path.join(app.getPath('userData'), 'saturne-state.json');
+
+function createWindow() {
+  win = new BrowserWindow({
+    width: 1440,
+    height: 860,
+    minWidth: 820,
+    minHeight: 520,
+    frame: false,
+    backgroundColor: '#2b2b2b',
+    title: 'Saturne',
+    icon: path.join(__dirname, 'build', 'icon.ico'),
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      webviewTag: true,
+      spellcheck: false,
+    },
+  });
+
+  win.loadFile(path.join(__dirname, 'src', 'index.html'));
+  win.once('ready-to-show', () => win.show());
+
+  const sendMax = () => win && win.webContents.send('win:maximized', win.isMaximized());
+  win.on('maximize', sendMax);
+  win.on('unmaximize', sendMax);
+  win.on('enter-full-screen', sendMax);
+  win.on('leave-full-screen', sendMax);
+  win.on('closed', () => { win = null; });
+
+  // Debug helper: SATURNE_SCREENSHOT=<file.png> saves a screenshot and quits (used for testing)
+  if (process.env.SATURNE_SCREENSHOT) {
+    win.webContents.on('console-message', (e) => console.log(`[renderer:${e.level}] ${e.message}`));
+    win.webContents.once('did-finish-load', () => {
+      const run = async () => {
+        if (process.env.SATURNE_EVAL) {
+          try { await win.webContents.executeJavaScript(process.env.SATURNE_EVAL); } catch (err) { console.log('[eval error]', err.message); }
+          await new Promise((r) => setTimeout(r, Number(process.env.SATURNE_EVAL_WAIT || 1500)));
+        }
+        const img = await win.webContents.capturePage();
+        fs.writeFileSync(process.env.SATURNE_SCREENSHOT, img.toPNG());
+        app.quit();
+      };
+      setTimeout(run, Number(process.env.SATURNE_DELAY || 3000));
+    });
+  }
+}
+
+if (process.env.SATURNE_USERDATA) app.setPath('userData', process.env.SATURNE_USERDATA);
+app.setName('Saturne');
+if (process.platform === 'win32') app.setAppUserModelId('Saturne.Browser');
+
+// only one Saturne window at a time: launching again focuses the existing one
+if (!app.requestSingleInstanceLock()) app.quit();
+app.on('second-instance', () => {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.focus();
+});
+
+// ---------- Shortcuts that must work even when a web page has focus ----------
+function isAppShortcut(i) {
+  if (i.type !== 'keyDown') return false;
+  const k = i.key.toLowerCase();
+  if (k === 'f5' || k === 'f12') return true;
+  if (i.alt && (k === 'arrowleft' || k === 'arrowright' || k === 'home')) return true;
+  if (i.control && i.shift && ['t', 's', 'i', 'r'].includes(k)) return true;
+  if (i.control && !i.shift && ['t', 'w', 'l', 'r', 'd', 'h', '=', '+', '-', '0'].includes(k)) return true;
+  if (i.control && k === 'tab') return true;
+  if (i.control && /^[1-9]$/.test(k)) return true;
+  return false;
+}
+
+app.on('web-contents-created', (_e, contents) => {
+  if (contents.getType() !== 'webview') return;
+
+  // target=_blank / window.open -> open as a new tab instead of a new window
+  contents.setWindowOpenHandler(({ url }) => {
+    if (win) win.webContents.send('tab:open', { url, background: false });
+    return { action: 'deny' };
+  });
+
+  contents.on('context-menu', (_ev, p) => {
+    if (!win) return;
+    // exact cursor position inside the window, so the menu opens right next to the pointer
+    const pt = screen.getCursorScreenPoint();
+    const b = win.getContentBounds();
+    win.webContents.send('page:context-menu', {
+      wcId: contents.id,
+      x: p.x, y: p.y,
+      cursorX: pt.x - b.x, cursorY: pt.y - b.y,
+      linkURL: p.linkURL,
+      srcURL: p.srcURL,
+      mediaType: p.mediaType,
+      selectionText: p.selectionText,
+      isEditable: p.isEditable,
+      editFlags: p.editFlags,
+      canGoBack: contents.navigationHistory ? contents.navigationHistory.canGoBack() : contents.canGoBack(),
+      canGoForward: contents.navigationHistory ? contents.navigationHistory.canGoForward() : contents.canGoForward(),
+    });
+  });
+
+  contents.on('before-input-event', (ev, input) => {
+    if (!win) return;
+    if (isAppShortcut(input)) {
+      ev.preventDefault();
+      win.webContents.send('app:shortcut', {
+        key: input.key, control: input.control, shift: input.shift, alt: input.alt,
+      });
+    }
+  });
+});
+
+// ---------- Session setup (user agent, permissions, downloads) ----------
+function setupSession() {
+  const ses = session.fromPartition(PARTITION);
+
+  // Remove "Electron" & app name tokens so sites treat us like a normal Chromium browser
+  const ua = ses.getUserAgent()
+    .replace(/\sElectron\/\S+/, '')
+    .replace(/\ssaturne-browser\/\S+/i, '');
+  ses.setUserAgent(ua);
+
+  const allowed = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock']);
+  ses.setPermissionRequestHandler((_wc, permission, cb) => cb(allowed.has(permission)));
+
+  let dlId = 0;
+  const items = new Map();
+  ses.on('will-download', (_e, item) => {
+    const id = ++dlId;
+    const dir = app.getPath('downloads');
+    const parsed = path.parse(item.getFilename());
+    let target = path.join(dir, parsed.base);
+    let n = 1;
+    while (fs.existsSync(target)) target = path.join(dir, `${parsed.name} (${n++})${parsed.ext}`);
+    item.setSavePath(target);
+    items.set(id, item);
+
+    const send = (state) => {
+      if (!win) return;
+      win.webContents.send('download:update', {
+        id,
+        filename: path.basename(target),
+        path: target,
+        url: item.getURL(),
+        total: item.getTotalBytes(),
+        received: item.getReceivedBytes(),
+        state: state || item.getState(),
+        paused: item.isPaused(),
+      });
+    };
+    item.on('updated', () => send());
+    item.once('done', (_ev, state) => { send(state); items.delete(id); });
+    send('progressing');
+  });
+
+  ipcMain.on('download:cancel', (_e, id) => { const it = items.get(id); if (it) it.cancel(); });
+}
+
+// ---------- IPC ----------
+ipcMain.on('win:minimize', () => win && win.minimize());
+ipcMain.on('win:toggle-maximize', () => {
+  if (!win) return;
+  if (win.isMaximized()) win.unmaximize(); else win.maximize();
+});
+ipcMain.on('win:close', () => win && win.close());
+ipcMain.on('win:is-maximized', (e) => { e.returnValue = win ? win.isMaximized() : false; });
+
+ipcMain.on('state:load', (e) => {
+  try { e.returnValue = JSON.parse(fs.readFileSync(statePath(), 'utf8')); }
+  catch { e.returnValue = null; }
+});
+ipcMain.handle('state:save', async (_e, data) => {
+  const tmp = statePath() + '.tmp';
+  await fs.promises.writeFile(tmp, JSON.stringify(data));
+  await fs.promises.rename(tmp, statePath());
+  return true;
+});
+
+ipcMain.handle('wallpaper:pick', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Choose a wallpaper',
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif'] }],
+  });
+  if (res.canceled || !res.filePaths[0]) return null;
+  const src = res.filePaths[0];
+  const dir = path.join(app.getPath('userData'), 'wallpapers');
+  await fs.promises.mkdir(dir, { recursive: true });
+  const dest = path.join(dir, `wallpaper-${Date.now()}${path.extname(src).toLowerCase()}`);
+  await fs.promises.copyFile(src, dest);
+  return pathToFileURL(dest).href;
+});
+
+ipcMain.handle('page:capture', async (_e, wcId) => {
+  try {
+    const wc = webContents.fromId(wcId);
+    if (!wc || wc.isDestroyed()) return null;
+    const img = await wc.capturePage();
+    if (img.isEmpty()) return null;
+    return img.resize({ width: 480, quality: 'good' }).toDataURL();
+  } catch { return null; }
+});
+
+// favicon as data URL (lets the UI read its colors without cross-origin restrictions)
+const faviconCache = new Map();
+ipcMain.handle('favicon:data', async (_e, url) => {
+  if (!/^https?:\/\//i.test(url || '')) return null;
+  if (faviconCache.has(url)) return faviconCache.get(url);
+  try {
+    const res = await session.fromPartition(PARTITION).fetch(url);
+    if (!res.ok) return null;
+    const type = res.headers.get('content-type') || 'image/png';
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 512 * 1024) return null;
+    const data = `data:${type};base64,${buf.toString('base64')}`;
+    faviconCache.set(url, data);
+    return data;
+  } catch { return null; }
+});
+
+// back / forward history list for a tab
+ipcMain.handle('nav:history', (_e, wcId) => {
+  const wc = webContents.fromId(wcId);
+  if (!wc || wc.isDestroyed()) return null;
+  const nh = wc.navigationHistory;
+  return { entries: nh.getAllEntries().map((x) => ({ url: x.url, title: x.title })), index: nh.getActiveIndex() };
+});
+ipcMain.on('nav:go-index', (_e, wcId, i) => {
+  const wc = webContents.fromId(wcId);
+  if (wc && !wc.isDestroyed()) wc.navigationHistory.goToIndex(i);
+});
+
+// DevTools docked inside our own panel (a <webview> in the UI)
+ipcMain.handle('devtools:attach', (_e, targetId, devtoolsId) => {
+  const target = webContents.fromId(targetId);
+  const devtools = webContents.fromId(devtoolsId);
+  if (!target || !devtools) return false;
+  if (target.isDevToolsOpened()) target.closeDevTools();
+  target.setDevToolsWebContents(devtools);
+  target.openDevTools();
+  return true;
+});
+ipcMain.on('devtools:close', (_e, targetId) => {
+  const target = webContents.fromId(targetId);
+  if (target && !target.isDestroyed() && target.isDevToolsOpened()) target.closeDevTools();
+});
+ipcMain.on('devtools:inspect', (_e, targetId, x, y) => {
+  const target = webContents.fromId(targetId);
+  if (target && !target.isDestroyed()) target.inspectElement(x, y);
+});
+
+ipcMain.on('clipboard:write', (_e, text) => clipboard.writeText(String(text || '')));
+ipcMain.on('clipboard:read', (e) => { e.returnValue = clipboard.readText(); });
+ipcMain.on('shell:open-path', (_e, p) => shell.openPath(p));
+ipcMain.on('shell:show-item', (_e, p) => shell.showItemInFolder(p));
+ipcMain.on('shell:open-downloads', () => shell.openPath(app.getPath('downloads')));
+
+// ---------- App lifecycle ----------
+app.whenReady().then(() => {
+  setupSession();
+  createWindow();
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+});
+
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

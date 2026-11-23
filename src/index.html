@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: https: http:; connect-src https://api.open-meteo.com https://geocoding-api.open-meteo.com; font-src 'self' data:;" />
+  <title>Saturne</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- ===== Top bar ===== -->
+    <header id="topbar">
+      <button class="icon-btn" id="btn-sidebar" data-tip="Toggle sidebar  (Ctrl+Shift+S)"></button>
+
+      <div id="nav-btns">
+        <button class="icon-btn" id="btn-back" data-tip="Back  (Alt+←)"></button>
+        <button class="icon-btn" id="btn-forward" data-tip="Forward  (Alt+→)"></button>
+        <button class="icon-btn" id="btn-home" data-tip="Home  (Alt+Home)"></button>
+        <button class="icon-btn" id="btn-reload" data-tip="Reload  (Ctrl+R)"></button>
+      </div>
+
+      <div id="urlbar" class="s-input">
+        <button class="url-icon" id="btn-copy-url" data-tip="Copy link"></button>
+        <input id="url-input" type="text" spellcheck="false" autocomplete="off"
+               placeholder="Search or enter address" />
+      </div>
+
+      <div id="win-btns">
+        <button class="win-btn" id="btn-more" data-tip="Menu"></button>
+        <button class="win-btn" id="btn-min"></button>
+        <button class="win-btn" id="btn-max"></button>
+        <button class="win-btn close" id="btn-close"></button>
+      </div>
+    </header>
+
+    <!-- ===== Sidebar ===== -->
+    <aside id="sidebar">
+      <div id="favorites"></div>
+
+      <div id="space-header">
+        <button id="space-name"><span class="initial">S</span><span class="label">Space</span><span class="chev"></span></button>
+      </div>
+
+      <div class="cs" id="tab-scroll">
+        <div class="cs-view" id="tab-list"></div>
+      </div>
+
+      <div id="sidebar-footer">
+        <button class="icon-btn" id="btn-downloads" data-tip="Downloads"><span class="dl-badge"></span></button>
+        <div id="space-dots"></div>
+        <button class="icon-btn" id="btn-new-space" data-tip="New space"></button>
+      </div>
+    </aside>
+
+    <!-- ===== Main area ===== -->
+    <main id="main">
+      <nav id="bookmarks"></nav>
+
+      <section id="content">
+        <div id="views"></div>
+
+        <!-- Home page (customizable) -->
+        <div id="home">
+          <div id="home-wallpaper"></div>
+          <div id="home-dim"></div>
+          <div id="home-canvas"></div>
+          <div id="home-editbar">
+            <span>Drag widgets to move them · drag the corner to resize</span>
+            <button class="s-btn primary" id="btn-edit-done">Done</button>
+          </div>
+          <button id="home-customize" class="s-btn glass"><span class="ico"></span>Customize</button>
+        </div>
+
+        <!-- Custom developer tools panel (DevTools docked inside the browser) -->
+        <div id="devtools-panel">
+          <div id="dt-splitter"></div>
+          <div class="dt-head">
+            <span class="dt-ico"></span>
+            <span class="dt-title">Developer Tools</span>
+            <span class="dt-target"></span>
+            <div class="dt-actions">
+              <button class="icon-btn" id="dt-dock" data-tip="Dock to the right"></button>
+              <button class="icon-btn" id="dt-reload" data-tip="Reload page"></button>
+              <button class="icon-btn" id="dt-close" data-tip="Close  (F12)"></button>
+            </div>
+          </div>
+          <div class="dt-body"></div>
+        </div>
+        <div id="drag-shield"></div>
+
+        <aside id="customize-panel" class="cs">
+          <div class="cs-view" id="customize-body"></div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <!-- floating layers: menus, previews, modals, toasts -->
+  <div id="layer"></div>
+  <div id="tooltip"></div>
+  <div id="toasts"></div>
+
+  <script src="js/icons.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/home.js"></script>
+  <script src="js/browser.js"></script>
+</body>
+</html>
