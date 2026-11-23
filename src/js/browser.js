@@ -1083,47 +1083,70 @@
     const bookmarked = onPage && S.bookmarks.some((b) => b.url === t.url);
     const st = S.settings;
     const set = (k, v) => { st[k] = v; Store.save(); applySettings(); };
+    const splitOn = !!shownSplit();
+
+    // compact layout: rows of tiles instead of one long list (no scrolling)
+    const tile = (icon, label, fn, { disabled = false, on = false, tip = '', sub = false } = {}) => {
+      const b = h('button.mm-tile' + (on ? '.on' : '') + (disabled ? '.disabled' : ''), tip ? { 'data-tip': tip } : null,
+        h('span.mm-ico', { html: icon }), h('span.mm-lbl', { text: label }), sub ? h('span.mm-sub', { html: Icons.chevDown }) : null);
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      b.addEventListener('click', () => {
+        if (disabled) return;
+        const rect = b.getBoundingClientRect();
+        Menu.closeAll();
+        fn(rect);
+      });
+      return b;
+    };
+    const below = (rect, items) => Menu.open({ x: rect.left, y: rect.bottom - 2, items });
+    const grid = (cls, ...tiles) => h('div.mm-grid' + cls, null, ...tiles);
+    const pct = () => `${Math.round(Math.pow(1.2, (rt.get(currentTabId) || {}).zoom || 0) * 100)}%`;
+    const zoomPct = h('span.mm-zoom-val', { text: pct() });
+    const zb = (icon, tip, d) => {
+      const b = h('button.mm-zb', { html: icon, 'data-tip': tip, onclick: () => { zoom(d); zoomPct.textContent = pct(); } });
+      b.disabled = !onPage;
+      return b;
+    };
+    const zr = h('button.mm-zb.mm-zr', { text: 'Reset', onclick: () => { zoom(0); zoomPct.textContent = pct(); } });
+    zr.disabled = !onPage;
+
+    const panel = h('div.mm', null,
+      grid('.g4',
+        tile(Icons.plus, 'New tab', () => newTab(), { tip: 'Ctrl+T' }),
+        tile(Icons.space, 'Space', newSpace, { tip: 'New space' }),
+        tile(Icons.folder, 'Folder', () => newFolder(), { tip: 'New folder' }),
+        tile(Icons.history, 'Reopen', reopenClosed, { disabled: !S.closed.length, tip: 'Reopen closed tab  (Ctrl+Shift+T)' })),
+      h('div.mm-title', { text: onPage ? host(t.url) : 'This page' }),
+      grid('.g5',
+        tile(bookmarked ? Icons.starFill : Icons.star, bookmarked ? 'Saved' : 'Bookmark', () => toggleBookmark(t), { disabled: !onPage, on: bookmarked, tip: 'Ctrl+D' }),
+        tile(Icons.pin, 'Favorite', () => addToFavorites(t), { disabled: !onPage, tip: 'Add to favorites' }),
+        tile(Icons.search, 'Find', () => Find.open(), { disabled: !onPage, tip: 'Find in page  (Ctrl+F)' }),
+        tile(Icons.split, splitOn ? 'Unsplit' : 'Split', () => (splitOn ? closeSplit() : pickSplit()), { disabled: !onPage && !splitOn, on: splitOn, tip: splitOn ? 'Close split view' : 'Split view' }),
+        tile(Icons.reader, 'Reader', () => Features.toggleReader(), { disabled: !onPage, on: Features.readerOn(), tip: 'Reader mode  (F9)' }),
+        tile(Icons.translate, 'Translate', (rc) => below(rc, Features.translateItems()), { disabled: !onPage, sub: true }),
+        tile(Icons.camera, 'Capture', (rc) => below(rc, [
+          { label: 'Select an area', icon: Icons.crop, shortcut: 'Ctrl+Shift+X', onClick: () => Features.screenshot('area') },
+          { label: 'Visible part', icon: Icons.window, onClick: () => Features.screenshot('visible') },
+          { label: 'Full page', icon: Icons.file, onClick: () => Features.screenshot('full') },
+        ]), { disabled: !onPage, sub: true, tip: 'Screenshot' }),
+        tile(Icons.pip, 'PiP', () => Features.pip(), { disabled: !onPage, tip: 'Picture-in-picture' }),
+        tile(Icons.printer, 'Print', printPage, { disabled: !onPage, tip: 'Ctrl+P' }),
+        tile(Icons.code, 'DevTools', () => DevTools.toggle(), { disabled: !(r && r.wv) && !DevTools.view, on: !!DevTools.view, tip: 'Developer tools  (F12)' })),
+      h('div.mm-zoom', null, h('span.mm-ico', { html: Icons.zoomIn }), h('span.mm-zl', { text: 'Zoom' }),
+        zb(Icons.zoomOut, 'Zoom out  (Ctrl+-)', -1), zoomPct, zb(Icons.zoomIn, 'Zoom in  (Ctrl+=)', 1), zr),
+      h('div.mm-sep'),
+      grid('.g4',
+        tile(Icons.history, 'History', openHistory, { tip: 'Ctrl+H' }),
+        tile(Icons.download, 'Downloads', () => openDownloads()),
+        tile(Icons.key, 'Passwords', () => Features.passwords()),
+        tile(Icons.puzzle, 'Extensions', () => Features.extensions())));
+
     Menu.open({
-      anchor: btn, align: 'right', minWidth: 250,
+      anchor: btn, align: 'right', minWidth: 340, className: 'main-menu',
       items: [
-        { label: 'New tab', icon: Icons.plus, shortcut: 'Ctrl+T', onClick: () => newTab() },
-        { label: 'New space…', icon: Icons.space, onClick: newSpace },
-        { label: 'New folder', icon: Icons.folder, onClick: newFolder },
-        { label: 'Reopen closed tab', icon: Icons.history, shortcut: 'Ctrl+Shift+T', disabled: !S.closed.length, onClick: reopenClosed },
+        { custom: panel },
         { sep: true },
-        { label: bookmarked ? 'Remove bookmark' : 'Bookmark this page', icon: bookmarked ? Icons.starFill : Icons.star, shortcut: 'Ctrl+D', disabled: !onPage, onClick: () => toggleBookmark(t) },
-        { label: 'Add to favorites', icon: Icons.pin, disabled: !onPage, onClick: () => addToFavorites(t) },
-        {
-          label: 'Zoom', icon: Icons.zoomIn, disabled: !onPage,
-          submenu: [
-            { label: 'Zoom in', icon: Icons.zoomIn, shortcut: 'Ctrl+=', keepOpen: true, onClick: () => zoom(1) },
-            { label: 'Zoom out', icon: Icons.zoomOut, shortcut: 'Ctrl+-', keepOpen: true, onClick: () => zoom(-1) },
-            { label: 'Reset zoom', icon: Icons.search, shortcut: 'Ctrl+0', onClick: () => zoom(0) },
-          ],
-        },
-        { label: 'Find in page', icon: Icons.search, shortcut: 'Ctrl+F', disabled: !onPage, onClick: () => Find.open() },
         { label: 'Search open tabs', icon: Icons.tabs, shortcut: 'Ctrl+Shift+A', onClick: () => TabSearch.open() },
-        shownSplit()
-          ? { label: 'Close split view', icon: Icons.split, onClick: closeSplit }
-          : { label: 'Split view…', icon: Icons.split, disabled: !onPage, onClick: pickSplit },
-        { sep: true },
-        { label: Features.readerOn() ? 'Exit reader mode' : 'Reader mode', icon: Icons.reader, shortcut: 'F9', disabled: !onPage, onClick: () => Features.toggleReader() },
-        { label: 'Translate page', icon: Icons.translate, disabled: !onPage, submenu: Features.translateItems() },
-        {
-          label: 'Screenshot', icon: Icons.camera, disabled: !onPage,
-          submenu: [
-            { label: 'Select an area', icon: Icons.crop, shortcut: 'Ctrl+Shift+X', onClick: () => Features.screenshot('area') },
-            { label: 'Visible part', icon: Icons.window, onClick: () => Features.screenshot('visible') },
-            { label: 'Full page', icon: Icons.file, onClick: () => Features.screenshot('full') },
-          ],
-        },
-        { label: 'Picture-in-picture', icon: Icons.pip, disabled: !onPage, onClick: () => Features.pip() },
-        { sep: true },
-        { label: 'History', icon: Icons.history, shortcut: 'Ctrl+H', onClick: openHistory },
-        { label: 'Downloads', icon: Icons.download, onClick: () => openDownloads() },
-        { label: 'Passwords', icon: Icons.key, onClick: () => Features.passwords() },
-        { label: 'Extensions', icon: Icons.puzzle, onClick: () => Features.extensions() },
-        { sep: true },
         { label: 'Customize home page', icon: Icons.palette, onClick: () => { if (!isHome(t)) newTab(); setTimeout(() => Home.openCustomize(), 60); } },
         {
           label: 'Settings', icon: Icons.gear,
@@ -1149,12 +1172,10 @@
             { sep: true },
             { label: 'Site permissions…', icon: Icons.globe, onClick: () => Perms.manage() },
             { label: isDefault ? 'Saturne is your default browser' : 'Make Saturne the default browser…', icon: Icons.saturn, checked: isDefault, disabled: isDefault, onClick: makeDefault },
+            { sep: true },
+            { label: 'About Saturne', icon: Icons.info, onClick: about },
           ],
         },
-        { label: 'Print…', icon: Icons.file, shortcut: 'Ctrl+P', disabled: !onPage, onClick: printPage },
-        { label: DevTools.view ? 'Close developer tools' : 'Developer tools', icon: Icons.code, shortcut: 'F12', disabled: !(r && r.wv) && !DevTools.view, onClick: () => DevTools.toggle() },
-        { sep: true },
-        { label: 'About Saturne', icon: Icons.info, onClick: about },
       ],
     });
   }

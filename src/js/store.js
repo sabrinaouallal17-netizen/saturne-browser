@@ -59,6 +59,14 @@
         worldclock: { enabled: false, x: 13, y: 14, scale: 1, zones: ['America/New_York', 'Asia/Tokyo'] },
         quote: { enabled: false, x: 50, y: 8, scale: 1 },
         battery: { enabled: false, x: 79, y: 9, scale: 1 },
+        text: { enabled: false, x: 50, y: 12, scale: 1, text: 'Hello there', size: 42, align: 'center' },
+        bigdate: { enabled: false, x: 13, y: 30, scale: 1 },
+        stopwatch: { enabled: false, x: 87, y: 62, scale: 1 },
+        progress: { enabled: false, x: 13, y: 62, scale: 1, show: {} },
+        moon: { enabled: false, x: 87, y: 90, scale: 1 },
+        counter: { enabled: false, x: 30, y: 85, scale: 1, label: 'Counter', value: 0, step: 1 },
+        calculator: { enabled: false, x: 66, y: 45, scale: 1 },
+        breathe: { enabled: false, x: 30, y: 30, scale: 1, seconds: 4 },
       },
       images: [], // CustomIMG widgets: { id, src, x, y, scale, width, radius, opacity, rotate, shadow, link }
     };

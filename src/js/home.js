@@ -31,6 +31,14 @@
     worldclock: 'World clock',
     quote: 'Quote of the day',
     battery: 'Battery',
+    text: 'Text',
+    bigdate: 'Date',
+    stopwatch: 'Stopwatch',
+    progress: 'Day & year progress',
+    moon: 'Moon phase',
+    counter: 'Counter',
+    calculator: 'Calculator',
+    breathe: 'Breathing',
   };
 
   const QUOTES = [
@@ -373,7 +381,221 @@
       }).catch(() => { pct.textContent = '—'; state.textContent = 'Not available'; });
       return el;
     },
+
+    // your own words, big — looks best with a custom font
+    text(cfg) {
+      const el = h('div.w-text', { text: cfg.text || 'Your text' });
+      el.style.fontSize = (cfg.size || 42) + 'px';
+      el.style.textAlign = cfg.align || 'center';
+      return el;
+    },
+
+    bigdate() {
+      const wd = h('div.bd-wd'), num = h('div.bd-num'), mo = h('div.bd-mo');
+      const el = h('div.w-bigdate.w-card', null, h('div.bd-top'), wd, num, mo);
+      const paint = () => {
+        const d = new Date();
+        wd.textContent = d.toLocaleDateString('en-US', { weekday: 'long' });
+        num.textContent = d.getDate();
+        mo.textContent = d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      };
+      paint(); el._tick = paint;
+      return el;
+    },
+
+    stopwatch() {
+      const time = h('div.sw-time'), laps = h('div.sw-laps');
+      const go = h('button.s-btn.primary');
+      const lap = h('button.s-btn.ghost', { text: 'Lap' });
+      const el = h('div.w-stopwatch.w-card', null, h('div.w-title', null, h('span', { text: 'Stopwatch' })), time,
+        h('div.t-btns', null, h('button.s-btn.ghost', { html: Icons.reload, 'data-tip': 'Reset', onclick: () => { Object.assign(swRun, { start: 0, acc: 0, running: false, laps: [] }); paint(); } }), go, lap), laps);
+      const now = () => swRun.acc + (swRun.running ? Date.now() - swRun.start : 0);
+      const fmt = (ms) => { const m = Math.floor(ms / 60000), s = Math.floor(ms / 1000) % 60, c = Math.floor(ms / 10) % 100; return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}<small>.${String(c).padStart(2, '0')}</small>`; };
+      const paint = () => {
+        time.innerHTML = fmt(now());
+        go.textContent = swRun.running ? 'Stop' : now() ? 'Resume' : 'Start';
+        lap.disabled = !swRun.running;
+        laps.replaceChildren(...swRun.laps.slice(-4).reverse().map((t, i, a) => h('div.sw-lap', null, h('span', { text: `Lap ${swRun.laps.length - i}` }), h('span', { html: fmt(t) }))));
+      };
+      go.onclick = () => {
+        if (swRun.running) { swRun.acc = now(); swRun.running = false; } else { swRun.start = Date.now(); swRun.running = true; loop(); }
+        paint();
+      };
+      lap.onclick = () => { swRun.laps.push(now()); paint(); };
+      const loop = () => { if (!swRun.running || !el.isConnected) return; time.innerHTML = fmt(now()); requestAnimationFrame(loop); };
+      paint(); if (swRun.running) loop();
+      return el;
+    },
+
+    progress(cfg) {
+      const list = h('div.pg-list');
+      const el = h('div.w-progress.w-card', null, h('div.w-title', null, h('span', { text: 'Progress' })), list);
+      const rows = ['day', 'week', 'month', 'year'].filter((k) => (cfg.show || {})[k] !== false).map((k) => {
+        const bar = h('i'), pct = h('span.pg-pct');
+        list.append(h('div.pg-row', null, h('div.pg-head', null, h('span', { text: k[0].toUpperCase() + k.slice(1) }), pct), h('div.pg-bar', null, bar)));
+        return { k, bar, pct };
+      });
+      const paint = () => {
+        const d = new Date();
+        const span = (a, b) => (d - a) / (b - a);
+        const day0 = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const wk = (d.getDay() + 6) % 7;
+        const week0 = new Date(day0 - wk * 86400000);
+        const v = {
+          day: span(day0, new Date(+day0 + 86400000)),
+          week: span(week0, new Date(+week0 + 7 * 86400000)),
+          month: span(new Date(d.getFullYear(), d.getMonth(), 1), new Date(d.getFullYear(), d.getMonth() + 1, 1)),
+          year: span(new Date(d.getFullYear(), 0, 1), new Date(d.getFullYear() + 1, 0, 1)),
+        };
+        for (const r of rows) { const p = v[r.k] * 100; r.bar.style.width = p + '%'; r.pct.textContent = p.toFixed(p < 10 ? 1 : 0) + '%'; }
+      };
+      paint(); el._tick = paint;
+      return el;
+    },
+
+    moon() {
+      // days since a known new moon, in a 29.53-day cycle
+      const synodic = 29.530588853;
+      const age = ((((Date.now() - Date.UTC(2000, 0, 6, 18, 14)) / 86400000) % synodic) + synodic) % synodic;
+      const f = age / synodic;
+      const names = ['New moon', 'Waxing crescent', 'First quarter', 'Waxing gibbous', 'Full moon', 'Waning gibbous', 'Last quarter', 'Waning crescent'];
+      const emo = ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
+      const i = Math.round(f * 8) % 8;
+      const lit = Math.round((1 - Math.cos(2 * Math.PI * f)) / 2 * 100);
+      const nextFull = Math.round(((0.5 - f + 1) % 1) * synodic);
+      return h('div.w-moon.w-card', null, h('div.mn-emo', { text: emo[i] }),
+        h('div', null, h('div.mn-name', { text: names[i] }), h('div.mn-sub', { text: i === 4 ? `${lit}% lit` : `${lit}% lit · full moon ${nextFull === 0 ? 'today' : `in ${nextFull} day${nextFull > 1 ? 's' : ''}`}` })));
+    },
+
+    counter(cfg) {
+      const num = h('div.ct-num');
+      const paint = () => { num.textContent = cfg.value || 0; };
+      const step = (n) => { cfg.value = (cfg.value || 0) + n; Store.save(); paint(); num.classList.remove('bump'); void num.offsetWidth; num.classList.add('bump'); };
+      paint();
+      return h('div.w-counter.w-card', null, h('div.ct-label', { text: cfg.label || 'Counter' }), num,
+        h('div.t-btns', null,
+          h('button.s-btn.ghost', { text: '−', onclick: () => step(-(cfg.step || 1)) }),
+          h('button.s-btn.ghost', { html: Icons.reload, 'data-tip': 'Reset', onclick: () => { cfg.value = 0; Store.save(); paint(); } }),
+          h('button.s-btn.primary', { text: '+', onclick: () => step(cfg.step || 1) })));
+    },
+
+    calculator() {
+      let expr = '', shown = '0';
+      const scr = h('div.calc-scr'), sub = h('div.calc-sub');
+      const paint = () => { scr.textContent = shown; sub.textContent = expr && expr !== shown ? expr : ''; };
+      const press = (k) => {
+        if (k === 'C') { expr = ''; shown = '0'; }
+        else if (k === '⌫') { expr = expr.slice(0, -1); shown = expr || '0'; }
+        else if (k === '=') { const r = calc(expr); if (r != null) { expr = String(r); shown = expr; } }
+        else if (k === '±') { if (/^-?[\d.]+$/.test(expr)) { expr = String(-Number(expr)); shown = expr; } }
+        else { if (/[+−×÷]$/.test(expr) && /[+−×÷]/.test(k)) expr = expr.slice(0, -1); expr += k; shown = expr; }
+        paint();
+      };
+      const keys = ['C', '±', '⌫', '÷', '7', '8', '9', '×', '4', '5', '6', '−', '1', '2', '3', '+', '0', '.', '%', '='];
+      const pad = h('div.calc-pad', null, keys.map((k) => h('button.calc-k' + (/[÷×−+=]/.test(k) ? '.op' : /[C±⌫%]/.test(k) ? '.fn' : ''), { text: k, onclick: () => press(k) })));
+      paint();
+      return h('div.w-calc.w-card', null, h('div.calc-disp', null, sub, scr), pad);
+    },
+
+    breathe(cfg) {
+      const ring = h('div.br-ring'), txt = h('div.br-txt');
+      const el = h('div.w-breathe.w-card', null, h('div.br-box', null, ring, txt), h('div.br-sub', { text: `${cfg.seconds || 4}s in · ${cfg.seconds || 4}s hold · ${cfg.seconds || 4}s out` }));
+      const s = (cfg.seconds || 4) * 1000;
+      const paint = () => {
+        const t = Date.now() % (s * 3);
+        const phase = t < s ? 0 : t < 2 * s ? 1 : 2;
+        txt.textContent = ['Breathe in', 'Hold', 'Breathe out'][phase];
+        ring.style.transitionDuration = (phase === 1 ? 0.3 : s / 1000) + 's';
+        ring.style.transform = `scale(${phase === 2 ? 0.55 : 1})`;
+      };
+      ring.style.transform = 'scale(.55)';
+      requestAnimationFrame(() => requestAnimationFrame(paint));
+      el._tick = paint;
+      return el;
+    },
   };
+
+  // stopwatch keeps running while the page is re-rendered
+  const swRun = { start: 0, acc: 0, running: false, laps: [] };
+
+  // calculator: + − × ÷ and %, with the usual priorities (no eval)
+  function calc(expr) {
+    const toks = String(expr).replace(/%/g, '/100').match(/\d*\.?\d+|[+−×÷/]/g);
+    if (!toks) return null;
+    const nums = [], ops = [];
+    let neg = false;
+    for (const t of toks) {
+      if (/[\d.]/.test(t)) { nums.push(neg ? -parseFloat(t) : parseFloat(t)); neg = false; }
+      else if (t === '−' && nums.length === ops.length) neg = !neg; // leading minus
+      else ops.push(t);
+    }
+    if (nums.length !== ops.length + 1) return null;
+    const a = [nums[0]], o = [];
+    ops.forEach((op, i) => {
+      const n = nums[i + 1];
+      if (op === '×') a.push(a.pop() * n);
+      else if (op === '÷' || op === '/') a.push(a.pop() / n);
+      else { o.push(op); a.push(n); }
+    });
+    let r = a[0];
+    o.forEach((op, i) => { r = op === '+' ? r + a[i + 1] : r - a[i + 1]; });
+    return isFinite(r) ? +r.toPrecision(12) : null;
+  }
+
+  // ---------- text style of a widget: font, bold, italic, underline, capitals, color, shadow ----------
+  const FONTS = {
+    '': ['Default', 'inherit'],
+    segoe: ['Segoe UI', '"Segoe UI Variable Display", "Segoe UI", sans-serif'],
+    bahn: ['Bahnschrift', 'Bahnschrift, "Segoe UI", sans-serif'],
+    franklin: ['Franklin', '"Franklin Gothic Medium", "Franklin Gothic", sans-serif'],
+    trebuchet: ['Trebuchet', '"Trebuchet MS", sans-serif'],
+    verdana: ['Verdana', 'Verdana, sans-serif'],
+    candara: ['Candara', 'Candara, sans-serif'],
+    impact: ['Impact', 'Impact, "Arial Black", sans-serif'],
+    georgia: ['Georgia', 'Georgia, serif'],
+    times: ['Times', '"Times New Roman", serif'],
+    cambria: ['Cambria', 'Cambria, serif'],
+    gabriola: ['Gabriola', 'Gabriola, serif'],
+    consolas: ['Consolas', 'Consolas, monospace'],
+    cascadia: ['Cascadia', '"Cascadia Code", Consolas, monospace'],
+    comic: ['Comic Sans', '"Comic Sans MS", cursive'],
+    print: ['Segoe Print', '"Segoe Print", cursive'],
+    script: ['Segoe Script', '"Segoe Script", cursive'],
+    inkfree: ['Ink Free', '"Ink Free", cursive'],
+  };
+  function applyTextStyle(w, st) {
+    st = st || {};
+    const f = FONTS[st.font];
+    w.classList.toggle('wf-font', !!(f && st.font));
+    if (f && st.font) w.style.setProperty('--wf', f[1]);
+    w.classList.toggle('wf-bold', !!st.bold);
+    w.classList.toggle('wf-italic', !!st.italic);
+    w.classList.toggle('wf-underline', !!st.underline);
+    w.classList.toggle('wf-upper', !!st.upper);
+    w.classList.toggle('wf-shadow', !!st.shadow);
+    w.classList.toggle('wf-color', !!st.color);
+    if (st.color) w.style.setProperty('--wc', st.color);
+    w.style.setProperty('--wls', (st.spacing || 0) / 100 + 'em');
+  }
+  function styleEditor(key, cfg) {
+    cfg.style = cfg.style || {};
+    const st = cfg.style;
+    const live = () => { const w = document.querySelector(`#home-canvas .widget[data-w="${key}"]`); if (w) applyTextStyle(w, st); Store.save(); };
+    const fonts = h('div.fs-grid', null, Object.entries(FONTS).map(([k, [name, css]]) => h('button.fs-font' + ((st.font || '') === k ? '.on' : ''), {
+      style: { fontFamily: k ? css : '' }, 'data-tip': name,
+      onclick: (e) => { st.font = k; fonts.querySelectorAll('.fs-font').forEach((b) => b.classList.toggle('on', b === e.currentTarget)); live(); },
+    }, h('b', { text: 'Aa' }), h('span', { text: name }))));
+    const tog = (k, label, tip, cls) => h('button.fs-tog' + (st[k] ? '.on' : '') + (cls ? '.' + cls : ''), { text: label, 'data-tip': tip, onclick: (e) => { st[k] = !st[k]; e.currentTarget.classList.toggle('on', st[k]); live(); } });
+    const color = colorInput(st.color || '#ffffff', (v) => { st.color = v; live(); });
+    const clearColor = h('button.gear-btn', { html: Icons.x, 'data-tip': 'Default color', onclick: () => { st.color = ''; color.style.background = '#ffffff'; live(); } });
+    return h('div.fs-box', null,
+      h('div.cp-label', { text: 'Text style' }),
+      h('div.fs-bar', null, tog('bold', 'B', 'Bold', 'b'), tog('italic', 'I', 'Italic', 'i'), tog('underline', 'U', 'Underline', 'u'),
+        tog('upper', 'AA', 'Capitals'), tog('shadow', 'S', 'Text shadow', 's'), h('span.fs-grow'), color, clearColor),
+      rangeRow('Letter spacing', st.spacing || 0, -5, 40, '', (v) => { st.spacing = v; live(); }),
+      h('div.cp-label', { text: 'Font', style: { marginTop: '10px' } }), fonts,
+      h('button.s-btn.fs-reset', { text: 'Reset style', onclick: () => { cfg.style = {}; Store.save(); renderWidgets(); renderCustomize(); } }));
+  }
 
   // ===================== CustomIMG (pictures & GIFs) =====================
   const IMG_DEFAULTS = { scale: 1, width: 260, radius: 16, opacity: 100, rotate: 0, shadow: true, link: '' };
@@ -561,6 +783,17 @@
       w.style.left = cfg.x + '%';
       w.style.top = cfg.y + '%';
       w.style.setProperty('--s', cfg.scale || 1);
+      applyTextStyle(w, cfg.style);
+      // right-click a widget: its options & text style
+      w.addEventListener('contextmenu', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        Menu.open({ x: e.clientX, y: e.clientY, items: [
+          { label: `${WIDGETS[key]} — options & style…`, icon: Icons.palette, onClick: () => { cpTab = 'widgets'; cpOpenWidget = key; Home.openCustomize(); } },
+          { label: 'Move & resize', icon: Icons.layout, onClick: () => setEditing(true) },
+          { sep: true },
+          { label: 'Hide widget', icon: Icons.x, danger: true, onClick: () => { cfg.enabled = false; Store.save(); renderWidgets(); if (panelOpen()) renderCustomize(); } },
+        ] });
+      });
       bindWidgetEdit(w, key, cfg);
       canvas.append(w);
     }
@@ -661,6 +894,7 @@
   const WIDGET_ICONS = {
     greeting: 'chat', clock: 'history', search: 'search', weather: 'w_partly', recent: 'tabs', notes: 'pencil', analog: 'saturn',
     calendar: 'layout', links: 'link', todo: 'check', timer: 'bolt', countdown: 'star', worldclock: 'globe', quote: 'reader', battery: 'unload',
+    text: 'textSize', bigdate: 'calendar', stopwatch: 'stopwatch', progress: 'chart', moon: 'moon', counter: 'plus', calculator: 'calc', breathe: 'heart',
   };
 
   function renderCustomize() {
@@ -714,7 +948,7 @@
       const grid = h('div.wd-grid');
       Object.entries(WIDGETS).forEach(([key, label]) => {
         const cfg = hm.widgets[key];
-        const hasOpts = !!widgetOptions(key, cfg);
+        const hasOpts = true; // every widget has at least its text style
         const tile = h('div.wd-tile' + (cfg.enabled ? '.on' : '') + (cpOpenWidget === key ? '.open' : ''), null,
           h('button.wd-main', { onclick: () => { cfg.enabled = !cfg.enabled; Store.save(); renderWidgets(); renderCustomize(); } },
             h('span.wd-ico', { html: Icons[WIDGET_ICONS[key]] || Icons.layout }), h('span.wd-name', { text: label }),
@@ -725,8 +959,9 @@
       let opts = null;
       if (cpOpenWidget && hm.widgets[cpOpenWidget] && hm.widgets[cpOpenWidget].enabled) {
         const box = widgetOptions(cpOpenWidget, hm.widgets[cpOpenWidget]);
-        if (box) opts = h('div.cp-card.wd-opts', null,
-          h('div.cp-row', null, h('b', { text: WIDGETS[cpOpenWidget] + ' options' }), h('button.gear-btn', { html: Icons.x, onclick: () => { cpOpenWidget = null; renderCustomize(); } })), box);
+        opts = h('div.cp-card.wd-opts', null,
+          h('div.cp-row', null, h('b', { text: WIDGETS[cpOpenWidget] }), h('button.gear-btn', { html: Icons.x, 'data-tip': 'Close', onclick: () => { cpOpenWidget = null; renderCustomize(); } })),
+          ...(box ? [box] : []), styleEditor(cpOpenWidget, hm.widgets[cpOpenWidget]));
       }
       page.append(
         h('div.cp-actions.cp-top-actions', null,
@@ -862,6 +1097,22 @@
         } });
       draw();
       box.append(list, row('City', add));
+    } else if (key === 'text') {
+      const ta = h('textarea.s-area', { placeholder: 'Write your text…', rows: 3, maxlength: 400 });
+      ta.value = cfg.text || '';
+      ta.addEventListener('input', () => { cfg.text = ta.value; rerender(); });
+      box.append(h('div.cp-col', null, ta),
+        rangeRow('Size', cfg.size || 42, 14, 120, 'px', (v) => { cfg.size = v; rerender(); }),
+        row('Align', UI.select({ value: cfg.align || 'center', width: 120, options: [{ value: 'left', label: 'Left' }, { value: 'center', label: 'Center' }, { value: 'right', label: 'Right' }], onChange: (v) => { cfg.align = v; rerender(); } })));
+    } else if (key === 'progress') {
+      cfg.show = cfg.show || {};
+      box.append(...['day', 'week', 'month', 'year'].map((k) => row(k[0].toUpperCase() + k.slice(1), UI.switch(cfg.show[k] !== false, (v) => { cfg.show[k] = v; rerender(); }))));
+    } else if (key === 'counter') {
+      const label = UI.field({ icon: null, placeholder: 'What are you counting?', value: cfg.label || '', clearable: false, onInput: (v) => { cfg.label = v; rerender(); } });
+      box.append(h('div.cp-col', null, label.el),
+        row('Step', UI.select({ value: cfg.step || 1, width: 100, options: [1, 2, 5, 10, 100].map((n) => ({ value: n, label: String(n) })), onChange: (v) => { cfg.step = v; Store.save(); renderWidgets(); } })));
+    } else if (key === 'breathe') {
+      box.append(row('Rhythm', UI.select({ value: cfg.seconds || 4, width: 130, options: [3, 4, 5, 6, 8].map((n) => ({ value: n, label: `${n} seconds` })), onChange: (v) => { cfg.seconds = v; rerender(); } })));
     } else return null;
     return box;
   }
