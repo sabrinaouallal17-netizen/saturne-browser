@@ -177,7 +177,12 @@
     wv.addEventListener('media-paused', () => { r.audible = false; refreshTab(tab.id); });
     wv.addEventListener('enter-html-full-screen', () => document.body.classList.add('page-fullscreen'));
     wv.addEventListener('leave-html-full-screen', () => document.body.classList.remove('page-fullscreen'));
-    wv.addEventListener('focus', () => Menu.closeAll());
+    wv.addEventListener('focus', () => {
+      Menu.closeAll();
+      // split view: clicking into the other side makes it the current tab (address bar, shortcuts…)
+      const sv = shownSplit();
+      if (sv && tab.id !== currentTabId && (tab.id === sv.a || tab.id === sv.b)) activateTab(tab.id, { focus: false });
+    });
     wv.addEventListener('found-in-page', (e) => Find.result(tab.id, e.result));
     // page process crashed or frozen: Saturne shows its own screen with a Reload button
     wv.addEventListener('render-process-gone', (e) => {
@@ -215,6 +220,8 @@
     const now = Date.now();
     for (const [id, r] of rt) {
       if (!r.wv || id === currentTabId || r.audible) continue;
+      const sv = shownSplit();
+      if (sv && (id === sv.a || id === sv.b)) continue; // both sides of the visible split view
       if (now - r.lastActive > mins * 60000) unloadTab(id);
     }
   }, 5000);
@@ -224,11 +231,96 @@
   // ======================= tab actions =======================
   function showView() {
     const t = currentTab();
-    for (const [id, r] of rt) if (r.wv) r.wv.classList.toggle('visible', id === currentTabId && !isHome(t));
-    Home.show(isHome(t));
+    const sv = shownSplit();
+    for (const [id, r] of rt) {
+      if (!r.wv) continue;
+      const inSplit = !!sv && (id === sv.a || id === sv.b);
+      r.wv.classList.toggle('visible', inSplit || (!sv && id === currentTabId && !isHome(t)));
+      r.wv.classList.toggle('split-a', inSplit && id === sv.a);
+      r.wv.classList.toggle('split-b', inSplit && id === sv.b);
+    }
+    Split.layout(sv);
+    Home.show(!sv && isHome(t));
     document.body.classList.remove('page-fullscreen');
     Find.sync(); Crash.sync(); Perms.sync();
+    if (window.Features) Features.sync();
   }
+
+  // ======================= split view (two tabs side by side) =======================
+  // saved per space: { a, b, ratio }. It shows whenever one of its two tabs is the current tab.
+  const splitOk = (sp, id) => { const l = locate(id); return !!l && l.space === sp && !isHome(l.tab); };
+  function shownSplit() {
+    const sp = space();
+    const s = sp && sp.split;
+    if (!s || (currentTabId !== s.a && currentTabId !== s.b)) return null;
+    if (!splitOk(sp, s.a) || !splitOk(sp, s.b)) return null;
+    return s;
+  }
+  const inAnySplit = (id) => S.spaces.some((sp) => sp.split && (sp.split.a === id || sp.split.b === id));
+  function unsplitTab(id) {
+    let changed = false;
+    for (const sp of S.spaces) if (sp.split && (sp.split.a === id || sp.split.b === id)) { delete sp.split; changed = true; }
+    if (changed) { Store.save(); showView(); paintAll(); }
+    return changed;
+  }
+  function openSplit(otherId) {
+    const t = currentTab();
+    const other = locate(otherId);
+    if (!other || other.fav || isHome(other.tab) || otherId === currentTabId) return;
+    const sp = other.space;
+    let a = currentTabId;
+    if (!t || isHome(t) || !splitOk(sp, a)) a = null;
+    if (!a) { activateTab(otherId); return UI.toast('Open a web page in this tab first, then split it with another one'); }
+    unsplitTab(a); unsplitTab(otherId);
+    sp.split = { a, b: otherId, ratio: 0.5 };
+    if (!rt.get(otherId) || !rt.get(otherId).wv) createWebview(other.tab);
+    activateTab(otherId);
+  }
+  function closeSplit() {
+    const sp = space();
+    if (!sp.split) return;
+    delete sp.split;
+    showView(); paintAll(); Store.save();
+  }
+  function pickSplit() {
+    const t = currentTab();
+    if (!t || isHome(t) || !locate(t.id) || locate(t.id).fav) return UI.toast('Open a web page first, then choose the tab to put next to it');
+    TabSearch.open({ pick: true });
+  }
+  const Split = {
+    el: null,
+    build() {
+      if (this.el) return;
+      const close = UI.h('button.split-x', { html: Icons.x, 'data-tip': 'Close split view', onclick: closeSplit });
+      const swap = UI.h('button.split-x', { html: Icons.swap, 'data-tip': 'Swap sides', onclick: () => { const s = space().split; if (s) { [s.a, s.b] = [s.b, s.a]; Store.save(); showView(); } } });
+      this.el = UI.h('div#split-divider', null, UI.h('div.split-grip'), UI.h('div.split-tools', null, swap, close));
+      this.el.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('button')) return;
+        e.preventDefault();
+        const s = space().split;
+        if (!s) return;
+        document.body.classList.add('resizing', 'ew');
+        const shield = $('drag-shield');
+        const rect = $('views').getBoundingClientRect();
+        const move = (ev) => { s.ratio = UI.clamp((ev.clientX - rect.left) / rect.width, 0.2, 0.8); this.layout(s); };
+        const up = () => {
+          document.body.classList.remove('resizing', 'ew');
+          shield.removeEventListener('pointermove', move); shield.removeEventListener('pointerup', up);
+          Store.save();
+        };
+        shield.addEventListener('pointermove', move);
+        shield.addEventListener('pointerup', up);
+      });
+      $('views').append(this.el);
+    },
+    layout(sv) {
+      $('content').classList.toggle('split', !!sv);
+      if (!sv) return;
+      this.build();
+      $('content').style.setProperty('--split', sv.ratio || 0.5);
+      for (const [id, r] of rt) if (r.wv) r.wv.classList.toggle('split-focus', id === currentTabId && (id === sv.a || id === sv.b));
+    },
+  };
 
   function activateTab(id, { focus = true } = {}) {
     const loc = locate(id);
@@ -245,6 +337,8 @@
     const r = R(id);
     r.lastActive = Date.now();
     if (!isHome(loc.tab) && !r.wv) createWebview(loc.tab);
+    const sv = shownSplit();
+    if (sv) for (const x of [sv.a, sv.b]) { const l = locate(x); if (l && !R(x).wv) createWebview(l.tab); R(x).lastActive = Date.now(); }
     showView();
     DevTools.follow();
     if (spaceChanged) renderSidebar(true); else paintAll();
@@ -287,6 +381,10 @@
     }
     const order = flatTabs(loc.space);
     const pos = order.findIndex((t) => t.id === id);
+    // closing one side of a split view: the other side stays open
+    const sp0 = loc.space.split;
+    const partner = sp0 && (sp0.a === id ? sp0.b : sp0.b === id ? sp0.a : null);
+    unsplitTab(id);
     loc.list.splice(loc.index, 1);
     if (!isHome(loc.tab)) {
       S.closed.unshift({ url: loc.tab.url, title: loc.tab.title, spaceId: loc.space.id });
@@ -299,7 +397,7 @@
     if (currentTabId === id) {
       currentTabId = null;
       const rest = order.filter((t) => t.id !== id);
-      pickNeighbor(rest[pos] || rest[pos - 1] || null);
+      pickNeighbor((partner && locate(partner) && locate(partner).tab) || rest[pos] || rest[pos - 1] || null);
     } else if (loc.space.activeTabId === id) loc.space.activeTabId = null;
     renderSidebar(); Store.save();
   }
@@ -318,6 +416,7 @@
     const loc = t && locate(t.id);
     if (!t || (loc && loc.fav)) { newTab(); return; }
     if (isHome(t)) { $('url-input').focus(); return; }
+    unsplitTab(t.id);
     if (DevTools.tabId === t.id) DevTools.close(false);
     const r = rt.get(t.id);
     if (r && r.wv) { r.wv.remove(); Object.assign(r, { wv: null, wcId: null, loading: false, audible: false, thumb: null, failedUrl: null, muted: false }); }
@@ -356,6 +455,7 @@
   function moveTabToSpace(id, spaceId) {
     const loc = locate(id);
     if (!loc || loc.fav || !space(spaceId) || loc.space.id === spaceId) return;
+    unsplitTab(id);
     loc.list.splice(loc.index, 1);
     if (loc.space.activeTabId === id) loc.space.activeTabId = null;
     space(spaceId).items.push(loc.tab);
@@ -615,6 +715,9 @@
     const r = rt.get(tab.id);
     row.classList.toggle('active', tab.id === currentTabId);
     row.classList.toggle('unloaded', !isLoaded(tab));
+    const sv = shownSplit();
+    row.classList.toggle('split-pair', !!sv && tab.id !== currentTabId && (tab.id === sv.a || tab.id === sv.b));
+    row.classList.toggle('in-split', inAnySplit(tab.id));
     const ri = row.querySelector('.ri');
     const key = (r && r.loading && r.wv ? 'L' : '') + (isHome(tab) ? 'H' : tab.favicon);
     if (ri.dataset.key !== key) { ri.dataset.key = key; ri.innerHTML = ''; ri.append(tabIcon(tab)); }
@@ -884,6 +987,9 @@
         { label: 'Reload', icon: Icons.reload, disabled: !loaded || isHome(tab), onClick: () => rt.get(tab.id).wv.reload() },
         { label: 'Duplicate', icon: Icons.duplicate, onClick: () => newTab(tab.url, { background: true, title: tab.title }) },
         { label: 'Copy link', icon: Icons.copy, disabled: isHome(tab), onClick: () => { window.saturne.copyText(tab.url); UI.toast('Link copied'); } },
+        inAnySplit(tab.id)
+          ? { label: 'Close split view', icon: Icons.split, onClick: () => { unsplitTab(tab.id); showView(); } }
+          : { label: 'Split view with current tab', icon: Icons.split, disabled: isHome(tab) || tab.id === currentTabId || !currentTab() || isHome(currentTab()), onClick: () => openSplit(tab.id) },
         { sep: true },
         { label: 'Add to favorites', icon: Icons.star, disabled: isHome(tab), onClick: () => addToFavorites(tab) },
         { label: 'Bookmark', icon: Icons.pin, disabled: isHome(tab), onClick: () => toggleBookmark(tab) },
@@ -996,8 +1102,27 @@
           ],
         },
         { label: 'Find in page', icon: Icons.search, shortcut: 'Ctrl+F', disabled: !onPage, onClick: () => Find.open() },
+        { label: 'Search open tabs', icon: Icons.tabs, shortcut: 'Ctrl+Shift+A', onClick: () => TabSearch.open() },
+        shownSplit()
+          ? { label: 'Close split view', icon: Icons.split, onClick: closeSplit }
+          : { label: 'Split view…', icon: Icons.split, disabled: !onPage, onClick: pickSplit },
+        { sep: true },
+        { label: Features.readerOn() ? 'Exit reader mode' : 'Reader mode', icon: Icons.reader, shortcut: 'F9', disabled: !onPage, onClick: () => Features.toggleReader() },
+        { label: 'Translate page', icon: Icons.translate, disabled: !onPage, submenu: Features.translateItems() },
+        {
+          label: 'Screenshot', icon: Icons.camera, disabled: !onPage,
+          submenu: [
+            { label: 'Select an area', icon: Icons.crop, shortcut: 'Ctrl+Shift+X', onClick: () => Features.screenshot('area') },
+            { label: 'Visible part', icon: Icons.window, onClick: () => Features.screenshot('visible') },
+            { label: 'Full page', icon: Icons.file, onClick: () => Features.screenshot('full') },
+          ],
+        },
+        { label: 'Picture-in-picture', icon: Icons.pip, disabled: !onPage, onClick: () => Features.pip() },
+        { sep: true },
         { label: 'History', icon: Icons.history, shortcut: 'Ctrl+H', onClick: openHistory },
         { label: 'Downloads', icon: Icons.download, onClick: () => openDownloads() },
+        { label: 'Passwords', icon: Icons.key, onClick: () => Features.passwords() },
+        { label: 'Extensions', icon: Icons.puzzle, onClick: () => Features.extensions() },
         { sep: true },
         { label: 'Customize home page', icon: Icons.palette, onClick: () => { if (!isHome(t)) newTab(); setTimeout(() => Home.openCustomize(), 60); } },
         {
@@ -1080,6 +1205,11 @@
         { label: 'Copy link address', icon: Icons.copy, onClick: () => window.saturne.copyText(p.linkURL) },
         { sep: true });
     }
+    if (p.mediaType === 'video') {
+      items.push(
+        { label: 'Picture-in-picture', icon: Icons.pip, onClick: () => Features.pip(tabId[0], p.x, p.y) },
+        { sep: true });
+    }
     if (p.mediaType === 'image' && p.srcURL) {
       items.push(
         { label: 'Open image in new tab', icon: Icons.image, onClick: () => newTab(p.srcURL, { background: true }) },
@@ -1105,6 +1235,10 @@
       { label: 'Back', icon: Icons.back, disabled: !p.canGoBack, onClick: () => wv.goBack() },
       { label: 'Forward', icon: Icons.forward, disabled: !p.canGoForward, onClick: () => wv.goForward() },
       { label: 'Reload', icon: Icons.reload, onClick: () => wv.reload() },
+      { sep: true },
+      { label: 'Translate page', icon: Icons.translate, submenu: Features.translateItems(tabId[0]) },
+      { label: 'Reader mode', icon: Icons.reader, shortcut: 'F9', onClick: () => { if (tabId[0] !== currentTabId) activateTab(tabId[0]); Features.toggleReader(); } },
+      { label: 'Screenshot', icon: Icons.camera, shortcut: 'Ctrl+Shift+X', onClick: () => { if (tabId[0] !== currentTabId) activateTab(tabId[0]); Features.screenshot('area'); } },
       { sep: true },
       { label: 'Inspect', icon: Icons.code, onClick: () => DevTools.inspect(tabId[0], p.x, p.y) });
     Menu.open({ x, y, items });
@@ -1369,6 +1503,7 @@
     $('btn-reload').disabled = !wv;
     $('urlbar').classList.toggle('loading', loading);
     document.title = t && !isHome(t) ? `${t.title} — Saturne` : 'Saturne';
+    if (window.Features) Features.sync();
   }
 
   function setupTopbar() {
@@ -1776,12 +1911,103 @@
   };
   window.saturne.onPermission((req) => Perms.ask(req));
 
+  // ======================= search open tabs (Ctrl+Shift+A) =======================
+  // also used to choose the second tab of a split view ({ pick: true })
+  const TabSearch = {
+    back: null,
+    open({ pick = false } = {}) {
+      if (this.back) return this.close();
+      Menu.closeAll();
+      const input = UI.h('input', { type: 'text', placeholder: pick ? 'Choose the tab to show next to this one, or type an address' : 'Search your open tabs', spellcheck: 'false', autocomplete: 'off' });
+      const list = UI.h('div.ts-list');
+      const box = UI.h('div.ts-box', null,
+        UI.h('div.ts-field', null, UI.h('span.ts-ico', { html: pick ? Icons.split : Icons.search }), input, UI.h('span.ts-key', { text: 'Esc' })), list);
+      this.back = UI.h('div.ts-back', null, box);
+      this.back.addEventListener('mousedown', (e) => { if (e.target === this.back) this.close(); });
+      let items = [], sel = 0;
+      const all = () => {
+        const out = [];
+        const add = (t, sp, fav) => {
+          if (pick && (isHome(t) || t.id === currentTabId || fav || sp.id !== S.activeSpaceId)) return;
+          out.push({ t, sp, fav });
+        };
+        // current space first
+        const spaces = [space(), ...S.spaces.filter((s) => s.id !== S.activeSpaceId)];
+        spaces.forEach((sp) => flatTabs(sp).forEach((t) => add(t, sp, false)));
+        if (!pick) S.favorites.forEach((f) => { if (f.tab) add(f.tab, { id: '', name: 'Favorites', color: '' }, true); });
+        // this space first, then open tabs before unloaded ones, most recently used first
+        const rank = (x) => { const r = rt.get(x.t.id); return [x.sp.id === S.activeSpaceId ? 0 : 1, r && r.wv ? 0 : 1, -((r && r.lastActive) || 0)]; };
+        return out.map((x) => ({ x, k: rank(x) })).sort((a, b) => a.k[0] - b.k[0] || a.k[1] - b.k[1] || a.k[2] - b.k[2]).map((o) => o.x);
+      };
+      const draw = () => {
+        const q = input.value.trim().toLowerCase();
+        const words = q.split(/\s+/).filter(Boolean);
+        items = all().filter(({ t, sp }) => {
+          const hay = `${isHome(t) ? 'new tab' : t.title} ${t.url} ${sp.name}`.toLowerCase();
+          return words.every((w) => hay.includes(w));
+        });
+        if (pick && q) items.push({ url: Store.resolveInput(input.value) });
+        sel = UI.clamp(sel, 0, Math.max(0, items.length - 1));
+        list.replaceChildren(...(items.length ? items.map((it, i) => {
+          if (it.url) {
+            return UI.h('button.ts-item' + (i === sel ? '.on' : ''), { onclick: () => choose(i) },
+              UI.h('span.ts-fav', { html: Icons.globe }), UI.h('span.ts-t', { text: `Open “${input.value.trim()}” next to this tab` }), UI.h('span.ts-sp', { text: 'New tab' }));
+          }
+          const { t, sp, fav } = it;
+          const r = rt.get(t.id);
+          const icon = UI.h('span.ts-fav');
+          if (isHome(t)) icon.innerHTML = Icons.saturn;
+          else if (t.favicon) { const img = UI.h('img', { src: t.favicon }); img.onerror = () => { icon.innerHTML = Icons.globe; }; icon.append(img); }
+          else icon.innerHTML = Icons.globe;
+          return UI.h('button.ts-item' + (i === sel ? '.on' : '') + (t.id === currentTabId ? '.cur' : '') + (r && r.wv || isHome(t) ? '' : '.unl'), { onclick: () => choose(i), onmousemove: () => { if (sel !== i) { sel = i; mark(); } } },
+            icon,
+            UI.h('span.ts-txt', null, UI.h('span.ts-t', { text: isHome(t) ? 'New Tab' : t.title || t.url }), UI.h('span.ts-u', { text: isHome(t) ? 'Home' : host(t.url) })),
+            r && r.audible ? UI.h('span.ts-audio', { html: Icons.speaker }) : null,
+            UI.h('span.ts-sp', null, sp.color ? UI.h('i', { style: { background: sp.color } }) : UI.h('span', { html: Icons.star }), UI.h('span', { text: fav ? 'Favorite' : sp.name })));
+        }) : [UI.h('div.ts-empty', { text: pick ? 'No other web page open in this space — type an address' : 'No open tab matches' })]));
+      };
+      const mark = () => [...list.children].forEach((x, i) => x.classList.toggle('on', i === sel));
+      const choose = (i) => {
+        const it = items[i];
+        if (!it) return;
+        this.close();
+        if (it.url) {
+          openSplit(newTab(it.url, { background: true }).id);
+        } else if (pick) openSplit(it.t.id);
+        else activateTab(it.t.id);
+      };
+      input.addEventListener('input', () => { sel = 0; draw(); });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % Math.max(1, items.length);
+          mark(); const b = list.children[sel]; if (b) b.scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter') { e.preventDefault(); choose(sel); }
+        else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.close(); }
+        else if (e.key === 'Tab') e.preventDefault();
+      });
+      draw();
+      $('layer').append(this.back);
+      setTimeout(() => input.focus(), 20);
+    },
+    close() {
+      const b = this.back;
+      if (!b) return;
+      this.back = null;
+      b.classList.add('leaving');
+      setTimeout(() => b.remove(), 140);
+    },
+  };
+
   // ======================= keyboard shortcuts =======================
   function handleShortcut(k) {
     const key = k.key.toLowerCase();
     const c = k.control, sh = k.shift, alt = k.alt;
     const wv = currentWv();
-    if (c && sh && key === 't') reopenClosed();
+    if (c && sh && key === 'a') TabSearch.open();
+    else if (c && sh && key === 'x') Features.screenshot('area');
+    else if (key === 'f9') Features.toggleReader();
+    else if (c && sh && key === 't') reopenClosed();
     else if (c && sh && key === 's') toggleSidebar();
     else if ((c && sh && key === 'i') || key === 'f12') DevTools.toggle();
     else if (alt && key === 'home') goHome();
@@ -1817,7 +2043,7 @@
     // let text fields keep their own Ctrl+A/C/V/X/Z etc.
     if (inText && k.control && !k.shift && ['a', 'c', 'v', 'x', 'z', 'y'].includes(keyL)) return;
     if (inText && k.alt) return;
-    if (!k.control && !k.alt && !['f5', 'f12', 'f3'].includes(keyL)) return;
+    if (!k.control && !k.alt && !['f5', 'f12', 'f3', 'f9'].includes(keyL)) return;
     if (handleShortcut(k)) e.preventDefault();
   });
 
@@ -1832,6 +2058,12 @@
     openInNewTab: (url) => newTab(url),
     // used by automated tests / debugging
     internals: { renderSidebar, DevTools, newFolder, toggleSidebar, setFavorite, tabMenu, folderMenu, locate, toggleFolder, chooseFolderIcon, goHome, activateTab },
+    // used by features.js (reader, translation, screenshots, passwords…)
+    rt, currentWv, flatTabs, space, locate, activateTab, renderBookmarks, applySettings, makeDefault,
+    get currentTabId() { return currentTabId; },
+    tabOfWc(wcId) { for (const [id, r] of rt) if (r.wcId === wcId && r.wv) return id; return null; },
+    split: { open: openSplit, close: closeSplit, pick: pickSplit, shown: shownSplit },
+    TabSearch,
   };
 
   applyTheme();

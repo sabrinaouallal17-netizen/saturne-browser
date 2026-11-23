@@ -15,6 +15,28 @@ contextBridge.exposeInMainWorld('saturne', {
   importHomeImages: (files) => ipcRenderer.invoke('homeimg:import', Array.from(files || []).map((f) => { try { return webUtils.getPathForFile(f); } catch { return ''; } })),
   deleteHomeImage: (url) => ipcRenderer.send('homeimg:delete', url),
 
+  // screenshots & translation
+  screenshot: (wcId, mode, rect) => ipcRenderer.invoke('shot:take', wcId, mode, rect),
+  translate: (texts, to) => ipcRenderer.invoke('tr:texts', texts, to),
+
+  // saved passwords
+  onPasswordOffer: on('pw:offer'),
+  answerPassword: (id, action) => ipcRenderer.send('pw:answer', id, action),
+  passwords: () => ipcRenderer.invoke('pw:all'),
+  revealPassword: (origin, u) => ipcRenderer.invoke('pw:reveal', origin, u),
+  deletePassword: (origin, u) => ipcRenderer.send('pw:delete', origin, u),
+
+  // Chrome extensions
+  extensions: () => ipcRenderer.invoke('ext:list'),
+  installExtension: (input) => ipcRenderer.invoke('ext:install', input),
+  loadUnpackedExtension: () => ipcRenderer.invoke('ext:unpacked'),
+  toggleExtension: (key, on) => ipcRenderer.invoke('ext:toggle', key, on),
+  removeExtension: (key) => ipcRenderer.invoke('ext:remove', key),
+
+  // first-run screen: bookmarks from other browsers
+  importBrowsers: () => ipcRenderer.invoke('import:browsers'),
+  importBookmarks: (key) => ipcRenderer.invoke('import:bookmarks', key),
+
   // default browser
   isDefaultBrowser: () => ipcRenderer.invoke('browser:is-default'),
   makeDefaultBrowser: () => ipcRenderer.invoke('browser:make-default'),

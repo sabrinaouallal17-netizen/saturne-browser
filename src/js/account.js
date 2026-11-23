@@ -288,5 +288,5 @@
   paintButton();
   paintUpdate(sat.updateStatus());
   syncWidth();
-  window.Account = { open: openPop, edit: () => editProfile(me()), check: checkNow, install: installUpdate };
+  window.Account = { open: openPop, edit: () => editProfile(me()), check: checkNow, install: installUpdate, refresh: () => { refresh(); paintButton(); } };
 })();

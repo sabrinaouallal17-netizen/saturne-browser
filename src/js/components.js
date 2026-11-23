@@ -201,7 +201,9 @@
     closeChild(entry);
     const i = stack.indexOf(entry);
     if (i >= 0) stack.splice(i, 1);
-    entry.el.remove();
+    const el = entry.el; // short fade-out, then gone
+    el.classList.add('menu-leave');
+    setTimeout(() => el.remove(), 120);
     if (entry.parent && entry.parent.child === entry) entry.parent.child = null;
     if (entry.opts.anchor) entry.opts.anchor.classList.remove('open');
     if (entry.opts.onClose) entry.opts.onClose();
@@ -374,7 +376,12 @@
     modal({ title, body, wide = false, onClose }) {
       const box = h('div.modal' + (wide ? '.wide' : ''), null, title ? h('h3', { text: title }) : null);
       const back = h('div.modal-back', null, box);
-      const close = () => { back.remove(); document.removeEventListener('keydown', key, true); onClose && onClose(); };
+      let closed = false;
+      const close = () => {
+        if (closed) return; closed = true;
+        back.classList.add('leaving'); setTimeout(() => back.remove(), 170);
+        document.removeEventListener('keydown', key, true); onClose && onClose();
+      };
       const key = (e) => { if (e.key === 'Escape' && !Menu.isOpen()) { e.preventDefault(); close(); } };
       document.addEventListener('keydown', key, true);
       back.addEventListener('mousedown', (e) => { if (e.target === back) close(); });

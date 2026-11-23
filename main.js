@@ -1,5 +1,5 @@
 // Saturne Browser - Electron main process
-const { app, BrowserWindow, ipcMain, session, dialog, shell, clipboard, webContents, screen, net } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog, shell, clipboard, webContents, screen, net, nativeImage, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
@@ -99,6 +99,15 @@ function createWindow() {
     },
   });
 
+  // every tab gets the page helper (saved passwords); the DevTools view has no partition and gets nothing
+  win.webContents.on('will-attach-webview', (_e, wp, params) => {
+    delete wp.preloadURL;
+    wp.contextIsolation = true;
+    wp.nodeIntegration = false;
+    if (params.partition) wp.preload = path.join(__dirname, 'page-preload.js');
+    else delete wp.preload;
+  });
+
   win.loadFile(path.join(__dirname, 'src', 'index.html'));
   win.once('ready-to-show', () => { if (ws.maximized) win.maximize(); win.show(); });
   win.webContents.once('did-finish-load', () => { if (pendingUrl) { openExternalUrl(pendingUrl); pendingUrl = null; } });
@@ -192,9 +201,9 @@ ipcMain.handle('browser:make-default', async () => {
 function isAppShortcut(i) {
   if (i.type !== 'keyDown') return false;
   const k = i.key.toLowerCase();
-  if (k === 'f5' || k === 'f12' || k === 'f3') return true;
+  if (k === 'f5' || k === 'f12' || k === 'f3' || k === 'f9') return true;
   if (i.alt && (k === 'arrowleft' || k === 'arrowright' || k === 'home')) return true;
-  if (i.control && i.shift && ['t', 's', 'i', 'r'].includes(k)) return true;
+  if (i.control && i.shift && ['t', 's', 'i', 'r', 'a', 'x'].includes(k)) return true;
   if (i.control && !i.shift && ['t', 'w', 'l', 'r', 'd', 'h', 'f', 'p', '=', '+', '-', '0'].includes(k)) return true;
   if (i.control && k === 'tab') return true;
   if (i.control && /^[1-9]$/.test(k)) return true;
@@ -649,6 +658,327 @@ ipcMain.handle('update:install', async () => {
 });
 ipcMain.on('update:get', (e) => { e.returnValue = { ...upd, canInstall: app.isPackaged }; });
 
+// only Saturne's own window may use these (never a web page)
+const fromUI = (e) => !!win && e.sender === win.webContents;
+const pageWc = (wcId) => { const wc = webContents.fromId(wcId); return wc && !wc.isDestroyed() && wc.getType() === 'webview' ? wc : null; };
+
+// ---------- Screenshots ----------
+// visible part, a selected area (rect in page pixels) or the whole page; saved to Pictures\Saturne and copied
+const stamp = () => { const d = new Date(), p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}`; };
+async function fullPageShot(wc) {
+  const dbg = wc.debugger;
+  const mine = !dbg.isAttached();
+  if (mine) dbg.attach('1.3');
+  try {
+    const m = await dbg.sendCommand('Page.getLayoutMetrics');
+    const size = m.cssContentSize || m.contentSize;
+    const width = Math.ceil(size.width), height = Math.min(Math.ceil(size.height), 16000);
+    const r = await dbg.sendCommand('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, optimizeForSpeed: true, clip: { x: 0, y: 0, width, height, scale: 1 } });
+    return nativeImage.createFromBuffer(Buffer.from(r.data, 'base64'));
+  } finally { if (mine) { try { dbg.detach(); } catch {} } }
+}
+ipcMain.handle('shot:take', async (e, wcId, mode, rect) => {
+  if (!fromUI(e)) return null;
+  const wc = pageWc(wcId);
+  if (!wc) return { error: 'This tab isn’t loaded.' };
+  try {
+    let img;
+    if (mode === 'full') img = await fullPageShot(wc);
+    else if (mode === 'area' && rect && rect.width > 2 && rect.height > 2) {
+      img = await wc.capturePage({ x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) });
+    } else img = await wc.capturePage();
+    if (!img || img.isEmpty()) return { error: 'Nothing to capture.' };
+    const dir = path.join(app.getPath('pictures'), 'Saturne');
+    await fs.promises.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `Screenshot ${stamp()}.png`);
+    await fs.promises.writeFile(file, img.toPNG());
+    clipboard.writeImage(img);
+    const s = img.getSize();
+    return { path: file, width: s.width, height: s.height };
+  } catch (err) { return { error: err.message }; }
+});
+
+// ---------- Page translation (Google Translate) ----------
+ipcMain.handle('tr:texts', async (e, texts, to) => {
+  if (!fromUI(e) || !Array.isArray(texts) || !/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(to || '')) return null;
+  const body = texts.slice(0, 128).map((t) => 'q=' + encodeURIComponent(String(t).slice(0, 5000))).join('&');
+  const res = await net.fetch(`https://translate.googleapis.com/translate_a/t?client=gtx&sl=auto&tl=${to}&dt=t`, {
+    method: 'POST', body, headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+  });
+  if (!res.ok) return { error: `The translation service answered ${res.status}.` };
+  const out = await res.json();
+  // one text -> ["…","en"] or [["…","en"]]; several -> [["…","en"], …]
+  const list = texts.length === 1 && typeof out[0] === 'string' ? [out] : out;
+  return { items: list.map((x) => (Array.isArray(x) ? { text: x[0], lang: x[1] } : { text: String(x), lang: '' })) };
+});
+
+// ---------- Saved passwords ----------
+// Encrypted with Windows' own protection (DPAPI) for this Windows user; one file per profile.
+const pwPath = () => path.join(profileDir(), 'saturne-passwords.json');
+let pw = null; // { logins: { origin: [{ u, p (encrypted, base64), t }] }, never: [origin] }
+const loadPw = () => {
+  if (pw) return pw;
+  try { pw = JSON.parse(fs.readFileSync(pwPath(), 'utf8')); } catch { pw = null; }
+  if (!pw || typeof pw !== 'object') pw = {};
+  pw.logins = pw.logins || {}; pw.never = pw.never || [];
+  return pw;
+};
+const savePw = () => { const tmp = pwPath() + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(pw)); fs.renameSync(tmp, pwPath()); };
+const enc = (s) => safeStorage.encryptString(s).toString('base64');
+const dec = (b) => { try { return safeStorage.decryptString(Buffer.from(b, 'base64')); } catch { return ''; } };
+const frameOrigin = (e) => originOf((e.senderFrame && e.senderFrame.url) || '');
+const pwOffers = new Map();
+let pwSeq = 0;
+// from a web page (page-preload.js): only ever about that page's own site
+ipcMain.handle('pw:for-page', (e) => {
+  const o = frameOrigin(e);
+  if (!/^https?:/.test(o) || e.sender.getType() !== 'webview') return [];
+  return (loadPw().logins[o] || []).map((x) => x.u);
+});
+ipcMain.handle('pw:fill', (e, u) => {
+  const o = frameOrigin(e);
+  if (!/^https?:/.test(o) || e.sender.getType() !== 'webview') return null;
+  const x = (loadPw().logins[o] || []).find((l) => l.u === u);
+  return x ? dec(x.p) : null;
+});
+ipcMain.on('pw:candidate', (e, data) => {
+  const o = frameOrigin(e);
+  if (!win || !/^https?:/.test(o) || e.sender.getType() !== 'webview' || !data || typeof data.p !== 'string') return;
+  if (!safeStorage.isEncryptionAvailable()) return;
+  const u = String(data.u || '').slice(0, 200), p = data.p.slice(0, 500);
+  if (!p) return;
+  loadPw();
+  if (pw.never.includes(o)) return;
+  const list = pw.logins[o] || [];
+  const same = list.find((l) => l.u === u);
+  if (same && dec(same.p) === p) return; // already saved
+  for (const [k, v] of pwOffers) if (v.wcId === e.sender.id) pwOffers.delete(k); // newest offer wins
+  const id = ++pwSeq;
+  pwOffers.set(id, { origin: o, u, p, wcId: e.sender.id });
+  win.webContents.send('pw:offer', { id, wcId: e.sender.id, origin: o, username: u, update: !!same });
+});
+ipcMain.on('pw:answer', (e, id, action) => {
+  if (!fromUI(e)) return;
+  const x = pwOffers.get(id);
+  pwOffers.delete(id);
+  if (!x) return;
+  loadPw();
+  if (action === 'never') { if (!pw.never.includes(x.origin)) pw.never.push(x.origin); savePw(); return; }
+  if (action !== 'save') return;
+  const list = pw.logins[x.origin] = pw.logins[x.origin] || [];
+  const i = list.findIndex((l) => l.u === x.u);
+  const item = { u: x.u, p: enc(x.p), t: Date.now() };
+  if (i >= 0) list[i] = item; else list.push(item);
+  savePw();
+});
+ipcMain.handle('pw:all', (e) => {
+  if (!fromUI(e)) return null;
+  loadPw();
+  const out = [];
+  for (const [o, list] of Object.entries(pw.logins)) for (const l of list) out.push({ origin: o, u: l.u, t: l.t });
+  return { logins: out, never: pw.never.slice() };
+});
+ipcMain.handle('pw:reveal', (e, origin, u) => {
+  if (!fromUI(e)) return null;
+  const x = (loadPw().logins[origin] || []).find((l) => l.u === u);
+  return x ? dec(x.p) : null;
+});
+ipcMain.on('pw:delete', (e, origin, u) => {
+  if (!fromUI(e)) return;
+  loadPw();
+  if (u === null) pw.never = pw.never.filter((o) => o !== origin);
+  else {
+    pw.logins[origin] = (pw.logins[origin] || []).filter((l) => l.u !== u);
+    if (!pw.logins[origin].length) delete pw.logins[origin];
+  }
+  savePw();
+});
+
+// ---------- Chrome extensions ----------
+// Installed from the Chrome Web Store (the .crx is unpacked into the profile) or loaded from a folder.
+// Electron supports part of the extension APIs: content scripts and simple popups work best.
+const extDir = () => { const d = path.join(profileDir(), 'extensions'); fs.mkdirSync(d, { recursive: true }); return d; };
+const extListPath = () => path.join(profileDir(), 'saturne-extensions.json');
+let exts = null; // [{ key, path, enabled, source }]
+const loadExtList = () => {
+  if (exts) return exts;
+  try { exts = JSON.parse(fs.readFileSync(extListPath(), 'utf8')); } catch { exts = []; }
+  if (!Array.isArray(exts)) exts = [];
+  return exts;
+};
+const saveExtList = () => fs.writeFileSync(extListPath(), JSON.stringify(exts, null, 1));
+const extSession = () => session.fromPartition(PARTITION_NOW());
+const extApi = () => { const s = extSession(); return s.extensions || s; };
+async function loadOneExtension(x) {
+  const ext = await extApi().loadExtension(x.path, { allowFileAccess: false });
+  x.id = ext.id;
+  return ext;
+}
+async function loadExtensions() {
+  for (const x of loadExtList()) {
+    if (!x.enabled) continue;
+    try { await loadOneExtension(x); } catch (err) { x.error = err.message; }
+  }
+}
+function extIcon(ext) {
+  const m = ext.manifest || {};
+  const icons = m.icons || (m.action && m.action.default_icon) || (m.browser_action && m.browser_action.default_icon) || {};
+  const list = typeof icons === 'string' ? [[128, icons]] : Object.entries(icons).sort((a, b) => Number(b[0]) - Number(a[0]));
+  for (const [, rel] of list) {
+    try {
+      const file = path.join(ext.path, String(rel).replace(/^\//, ''));
+      const img = nativeImage.createFromPath(file);
+      if (!img.isEmpty()) return img.resize({ width: 32 }).toDataURL();
+    } catch {}
+  }
+  return '';
+}
+const extMsg = (ext, s) => { // "__MSG_name__" -> localized string
+  const m = /^__MSG_(\w+)__$/.exec(s || '');
+  if (!m) return s;
+  for (const loc of ['fr', 'en', 'en_US', (ext.manifest && ext.manifest.default_locale) || 'en']) {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(ext.path, '_locales', loc, 'messages.json'), 'utf8'));
+      const k = Object.keys(j).find((x) => x.toLowerCase() === m[1].toLowerCase());
+      if (k) return j[k].message;
+    } catch {}
+  }
+  return s;
+};
+function extInfo() {
+  const loaded = new Map(extApi().getAllExtensions().map((x) => [x.path, x]));
+  return loadExtList().map((x) => {
+    const ext = loaded.get(x.path);
+    let manifest = ext && ext.manifest;
+    if (!manifest) { try { manifest = JSON.parse(fs.readFileSync(path.join(x.path, 'manifest.json'), 'utf8')); } catch { manifest = {}; } }
+    const e2 = ext || { path: x.path, manifest };
+    const popup = (manifest.action && manifest.action.default_popup) || (manifest.browser_action && manifest.browser_action.default_popup) || '';
+    const options = manifest.options_page || (manifest.options_ui && manifest.options_ui.page) || '';
+    return {
+      key: x.key, id: ext ? ext.id : x.id || '', enabled: !!x.enabled && !!ext, source: x.source,
+      name: extMsg(e2, manifest.name) || x.key, version: manifest.version || '', description: extMsg(e2, manifest.description) || '',
+      icon: extIcon(e2), popup: ext && popup ? `${ext.url}${popup.replace(/^\//, '')}` : '',
+      options: ext && options ? `${ext.url}${options.replace(/^\//, '')}` : '', error: x.error || '',
+    };
+  });
+}
+async function addExtension(dir, key, source) {
+  const list = loadExtList();
+  let x = list.find((e) => e.key === key);
+  if (x && x.enabled) { try { const old = extApi().getAllExtensions().find((e) => e.path === x.path); if (old) extApi().removeExtension(old.id); } catch {} }
+  if (!x) { x = { key, path: dir, enabled: true, source }; list.push(x); }
+  x.path = dir; x.enabled = true; delete x.error;
+  try { await loadOneExtension(x); } catch (err) { list.splice(list.indexOf(x), 1); saveExtList(); throw err; }
+  saveExtList();
+}
+// Chrome Web Store: link or 32-letter id -> download the .crx, drop its header, unzip it
+async function installFromStore(input) {
+  const m = /([a-p]{32})/.exec(String(input || ''));
+  if (!m) throw new Error('Paste a Chrome Web Store link (or the extension’s 32-letter id).');
+  const id = m[1];
+  const url = process.env.SATURNE_CRX_URL // tests only: a local package server
+    ? process.env.SATURNE_CRX_URL.replace('{id}', id)
+    : `https://clients2.google.com/service/update2/crx?response=redirect&prodversion=${process.versions.chrome}&acceptformat=crx2,crx3&x=id%3D${id}%26uc`;
+  const res = await net.fetch(url, { headers: { 'User-Agent': extSession().getUserAgent() } });
+  if (!res.ok) throw new Error(`The Chrome Web Store answered ${res.status}.`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  await unpackCrx(buf, path.join(extDir(), id));
+  await addExtension(path.join(extDir(), id), id, 'store');
+  return id;
+}
+async function unpackCrx(buf, dest) {
+  if (buf.length < 16 || buf.toString('latin1', 0, 4) !== 'Cr24') throw new Error('This isn’t an extension package (it may not exist or not be available for your browser).');
+  const ver = buf.readUInt32LE(4);
+  const start = ver === 3 ? 12 + buf.readUInt32LE(8) : 16 + buf.readUInt32LE(8) + buf.readUInt32LE(12);
+  const tmp = await fs.promises.mkdtemp(path.join(app.getPath('temp'), 'saturne-crx-'));
+  try {
+    const zip = path.join(tmp, 'ext.zip');
+    await fs.promises.writeFile(zip, buf.subarray(start));
+    const out = path.join(tmp, 'x');
+    await fs.promises.mkdir(out);
+    await run(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-xf', zip, '-C', out]);
+    if (!fs.existsSync(path.join(out, 'manifest.json'))) throw new Error('The package has no manifest.json.');
+    await fs.promises.rm(path.join(out, '_metadata'), { recursive: true, force: true }); // Chrome's signature files
+    await fs.promises.rm(dest, { recursive: true, force: true });
+    await fs.promises.cp(out, dest, { recursive: true });
+  } finally { fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {}); }
+}
+ipcMain.handle('ext:list', (e) => (fromUI(e) ? extInfo() : null));
+ipcMain.handle('ext:install', async (e, input) => {
+  if (!fromUI(e)) return null;
+  try { await installFromStore(input); return { ok: true, list: extInfo() }; } catch (err) { return { error: err.message }; }
+});
+ipcMain.handle('ext:unpacked', async (e) => {
+  if (!fromUI(e)) return null;
+  const r = await dialog.showOpenDialog(win, { title: 'Choose an unpacked extension folder (with a manifest.json)', properties: ['openDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return { cancelled: true };
+  const dir = r.filePaths[0];
+  if (!fs.existsSync(path.join(dir, 'manifest.json'))) return { error: 'This folder has no manifest.json.' };
+  try { await addExtension(dir, 'folder:' + dir.toLowerCase(), 'folder'); return { ok: true, list: extInfo() }; } catch (err) { return { error: err.message }; }
+});
+ipcMain.handle('ext:toggle', async (e, key, on) => {
+  if (!fromUI(e)) return null;
+  const x = loadExtList().find((v) => v.key === key);
+  if (!x) return extInfo();
+  const ext = extApi().getAllExtensions().find((v) => v.path === x.path);
+  if (!on && ext) extApi().removeExtension(ext.id);
+  if (on && !ext) { try { await loadOneExtension(x); delete x.error; } catch (err) { x.error = err.message; } }
+  x.enabled = !!on;
+  saveExtList();
+  return extInfo();
+});
+ipcMain.handle('ext:remove', async (e, key) => {
+  if (!fromUI(e)) return null;
+  const list = loadExtList();
+  const x = list.find((v) => v.key === key);
+  if (!x) return extInfo();
+  const ext = extApi().getAllExtensions().find((v) => v.path === x.path);
+  if (ext) extApi().removeExtension(ext.id);
+  list.splice(list.indexOf(x), 1);
+  saveExtList();
+  if (x.source === 'store' && path.dirname(x.path) === extDir()) await fs.promises.rm(x.path, { recursive: true, force: true }).catch(() => {});
+  return extInfo();
+});
+
+// ---------- Import bookmarks from other browsers (first-run screen) ----------
+const BROWSERS = [
+  { key: 'chrome', name: 'Google Chrome', dir: ['LOCALAPPDATA', 'Google', 'Chrome', 'User Data'] },
+  { key: 'edge', name: 'Microsoft Edge', dir: ['LOCALAPPDATA', 'Microsoft', 'Edge', 'User Data'] },
+  { key: 'brave', name: 'Brave', dir: ['LOCALAPPDATA', 'BraveSoftware', 'Brave-Browser', 'User Data'] },
+  { key: 'vivaldi', name: 'Vivaldi', dir: ['LOCALAPPDATA', 'Vivaldi', 'User Data'] },
+  { key: 'opera', name: 'Opera', dir: ['APPDATA', 'Opera Software', 'Opera Stable'], flat: true },
+  { key: 'operagx', name: 'Opera GX', dir: ['APPDATA', 'Opera Software', 'Opera GX Stable'], flat: true },
+];
+const bookmarksFile = (b) => {
+  const base = process.env[b.dir[0]];
+  return base ? path.join(base, ...b.dir.slice(1), ...(b.flat ? [] : ['Default']), 'Bookmarks') : '';
+};
+function readBookmarks(b) {
+  const j = JSON.parse(fs.readFileSync(bookmarksFile(b), 'utf8'));
+  const out = [], seen = new Set();
+  const walk = (n) => {
+    if (!n || out.length >= 300) return;
+    if (n.type === 'url' && /^https?:\/\//i.test(n.url || '') && !seen.has(n.url)) { seen.add(n.url); out.push({ title: String(n.name || '').slice(0, 200), url: n.url }); }
+    (n.children || []).forEach(walk);
+  };
+  const r = j.roots || {};
+  walk(r.bookmark_bar); walk(r.other); walk(r.synced);
+  return out;
+}
+ipcMain.handle('import:browsers', (e) => {
+  if (!fromUI(e)) return null;
+  const out = [];
+  for (const b of BROWSERS) {
+    try { const n = readBookmarks(b).length; if (n) out.push({ key: b.key, name: b.name, count: n }); } catch {}
+  }
+  return out;
+});
+ipcMain.handle('import:bookmarks', (e, key) => {
+  if (!fromUI(e)) return null;
+  const b = BROWSERS.find((x) => x.key === key);
+  try { return b ? readBookmarks(b) : []; } catch { return []; }
+});
+
 // ---------- App lifecycle ----------
 // storage of deleted profiles can only be removed once it's no longer open: done at the next start
 function sweepDeletedProfiles() {
@@ -666,7 +996,7 @@ app.whenReady().then(() => {
   activeProfile();
   sweepDeletedProfiles();
   setupSession();
-  createWindow();
+  loadExtensions().catch(() => {}).finally(createWindow);
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   // look for updates shortly after starting, then every 30 minutes
   setTimeout(checkUpdate, 8000);
