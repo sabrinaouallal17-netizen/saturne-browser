@@ -215,9 +215,10 @@ function isAppShortcut(i) {
 app.on('web-contents-created', (_e, contents) => {
   // popup windows (sign-in): links they open go to tabs, and nested popups stay popups
   if (contents.getType() === 'window') {
+    followGoogleLogin(contents); // right away: the popup may already be heading to Google
     setImmediate(() => {
       if (contents.isDestroyed() || (win && contents === win.webContents)) return;
-      contents.setUserAgent(contents.session.getUserAgent());
+      contents.setUserAgent(GOOGLE_LOGIN.test(contents.getURL()) ? FIREFOX_UA : contents.session.getUserAgent());
       contents.setWindowOpenHandler(({ url, disposition }) => {
         if (disposition === 'new-window') return { action: 'allow', overrideBrowserWindowOptions: { width: 520, height: 680, autoHideMenuBar: true, parent: win || undefined } };
         if (win) win.webContents.send('tab:open', { url, background: false });
@@ -227,6 +228,7 @@ app.on('web-contents-created', (_e, contents) => {
     return;
   }
   if (contents.getType() !== 'webview') return;
+  followGoogleLogin(contents);
 
   // target=_blank / window.open -> open as a new tab instead of a new window
   // Ctrl+click / middle-click on a link opens it in the background
@@ -245,11 +247,16 @@ app.on('web-contents-created', (_e, contents) => {
           x: Math.round(b.x + (b.width - width) / 2), y: Math.round(b.y + Math.max(40, (b.height - height) / 2)),
           parent: win, autoHideMenuBar: true, backgroundColor: '#ffffff', title: 'Saturne',
           icon: path.join(__dirname, 'build', 'icon.ico'), minimizable: false,
+          webPreferences: { preload: path.join(__dirname, 'page-preload.js'), contextIsolation: true, nodeIntegration: false },
         },
       };
     }
     if (win) win.webContents.send('tab:open', { url, background: disposition === 'background-tab' });
     return { action: 'deny' };
+  });
+  // a sign-in popup heading to Google must present itself as Firefox from its very first page
+  contents.on('did-create-window', (child, { url }) => {
+    if (GOOGLE_LOGIN.test(url || '')) child.webContents.setUserAgent(FIREFOX_UA);
   });
 
   contents.on('context-menu', (_ev, p) => {
@@ -282,6 +289,29 @@ app.on('web-contents-created', (_e, contents) => {
     }
   });
 });
+
+// ---------- Google sign-in ----------
+// Google refuses to sign in from browsers built on Electron ("This browser or app may not be secure"),
+// whatever the Chrome version says. On its sign-in pages only, Saturne presents itself as Firefox,
+// which Google accepts; everywhere else it stays a normal Chrome.
+const GOOGLE_LOGIN = /^https:\/\/accounts\.google\.com\//i;
+const FIREFOX_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0';
+function setupGoogleLogin(ses) {
+  ses.webRequest.onBeforeSendHeaders({ urls: ['https://accounts.google.com/*'] }, (d, cb) => {
+    const h = { ...d.requestHeaders };
+    for (const k of Object.keys(h)) if (/^sec-ch-ua/i.test(k)) delete h[k]; // Firefox doesn't send these
+    h['User-Agent'] = FIREFOX_UA;
+    cb({ requestHeaders: h });
+  });
+}
+// the page itself (navigator.userAgent) must agree with the headers
+function followGoogleLogin(contents) {
+  contents.on('did-start-navigation', (d) => {
+    if (!d.isMainFrame || d.isSameDocument) return;
+    const want = GOOGLE_LOGIN.test(d.url) ? FIREFOX_UA : contents.session.getUserAgent();
+    if (contents.getUserAgent() !== want) contents.setUserAgent(want);
+  });
+}
 
 // ---------- Stay signed in ----------
 // Many sites keep you logged in with "session" cookies, which Chromium deletes when the browser closes.
@@ -452,6 +482,7 @@ function setupSession() {
   setupCookies(ses);
   setupPermissions(ses);
   setupAdblock(ses);
+  setupGoogleLogin(ses);
 
   let dlId = 0;
   const items = new Map();

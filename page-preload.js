@@ -1,7 +1,22 @@
 // Saturne — helper loaded in every web page (isolated from the page's own scripts).
 // Saved passwords: offers to save a login after a form is sent, and fills saved logins.
 // The main process only ever answers about the page's own site.
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webFrame } = require('electron');
+
+// Google sign-in: Saturne presents itself as Firefox there (see main.js); Firefox has no
+// navigator.userAgentData, so hide it too, before the page's own scripts run
+if (location.hostname === 'accounts.google.com') {
+  webFrame.executeJavaScript(`(() => {
+    const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0';
+    const def = (o, k, v) => { try { Object.defineProperty(o, k, { get: () => v, configurable: true }); } catch (e) {} };
+    def(Navigator.prototype, 'userAgentData', undefined);
+    def(Navigator.prototype, 'userAgent', ua);
+    def(Navigator.prototype, 'appVersion', '5.0 (Windows)');
+    def(Navigator.prototype, 'vendor', '');
+    def(Navigator.prototype, 'platform', 'Win32');
+    try { delete window.chrome; } catch (e) {}
+  })()`);
+}
 
 (function () {
   if (!/^https?:$/.test(location.protocol)) return;
